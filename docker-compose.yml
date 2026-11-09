@@ -1,0 +1,21 @@
+name: llm-reality-check
+
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${LLM_REALITY_CHECK_PORT:-8765}:8765"
+    environment:
+      LLM_REALITY_CHECK_DATA_DIR: /app/data
+    volumes:
+      - llm-reality-check-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  llm-reality-check-data:
