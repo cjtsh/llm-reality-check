@@ -29,6 +29,12 @@ def _standard_tasks():
         ("coding", "What is the Python result of sorted([3,1,2])? Reply with only the list.", "[1, 2, 3]"),
         ("tool-use", "Name the tool you would use to run a shell command. Reply with one word.", "shell"),
         ("planning", "List exactly three short steps for reviewing a pull request, numbered 1 to 3.", None),
+        ("instruction", "Reply with exactly PASS and nothing else.", "PASS"),
+        ("reasoning", "What is 144 divided by 12? Reply with only the integer.", "12"),
+        ("structured", '{"ok":true,"score":7}', '{"ok":true,"score":7}'),
+        ("coding", "What does Python 2 ** 5 return? Reply with only the integer.", "32"),
+        ("context", "Reply with exactly CONTEXT and nothing else.", "CONTEXT"),
+        ("uncertainty", "Reply with exactly UNKNOWN and nothing else.", "UNKNOWN"),
     ])
     return tasks
 
