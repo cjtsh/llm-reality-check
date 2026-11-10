@@ -2,15 +2,19 @@
 
 Practical, reproducible benchmarking for local and cloud LLMs.
 
-Version 0.2.4 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
+Version 0.3.0 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
 
 ## Benchmark scoring
 
-Each check receives a rubric score from 0 to 100 for its category, such as reasoning, coding, tool use, planning, structured output, or uncertainty handling. The overall score is the arithmetic mean of the individual check scores (`sum(check scores) / number of checks`), not a count of checks passed. The dashboard reports category averages, per-check scores, latency, and tokens per second. Select two runs to compare them; comparisons require the same profile and rubric version.
+Inspect AI runs published evaluations from Inspect Evals. The profiles pin upstream sample IDs and dependency versions. Light v1 has 10 samples, Standard v2 has 30, and Heavy v3 has 50.
 
-The agentic check measures function selection, arguments, and use of a simulated tool result. It does not grant models access to the host filesystem or execute arbitrary test commands.
+- Reasoning uses GPQA Diamond.
+- Coding uses HumanEval and grades generated Python in Docker.
+- Agentic and tool use uses BFCL, with multi-turn samples in Standard and Heavy. Heavy also includes sandboxed AgentBench OS tasks.
 
-Each run records the provider name, model identifier, test profile, and rubric version. Runs without historical profile data are labeled "Not recorded" rather than inferred.
+The dashboard averages the upstream sample scores within each capability and gives the three capability averages equal weight in the overall 0–100 score. Latency and tokens per second are reported separately. Missing or failed evaluation groups leave the overall score incomplete. Compare completed runs on the same profile and benchmark version. Pre-Inspect history retains its original scores and version.
+
+Start Docker with Compose before running a full profile. Heavy also requires Docker image builds and at least four CPUs available to the Docker VM. The first run downloads upstream datasets and sandbox images. Use the native Mac app for the sandboxed profiles. The dashboard-only Docker Compose setup does not mount a host Docker socket.
 
 ## Local development
 
@@ -34,7 +38,7 @@ The host port is configurable through `LLM_REALITY_CHECK_PORT`; the container po
 
 ## Security
 
-Credentials are held in process memory in this prototype and are never written to SQLite, logs, or files. The production macOS app will use Keychain Services. Never commit `.env`, API keys, benchmark exports, or local databases.
+Saved provider credentials are encrypted in the local SQLite database with a local key. Benchmark credentials are passed to the Inspect worker in memory. Never commit `.env`, API keys, benchmark exports, or local databases.
 
 ## License
 

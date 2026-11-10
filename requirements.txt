@@ -2,5 +2,8 @@ fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 httpx>=0.28,<1
 pydantic>=2.10,<3
-inspect-ai>=0.3.288,<0.4
+inspect-ai==0.3.288
+agent-client-protocol==0.12.1
+inspect-evals[bfcl]==0.28.0
+openai==3.4.0
 cryptography>=44,<47

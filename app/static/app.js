@@ -2,7 +2,9 @@ const $ = (id) => document.getElementById(id);
 let timer = null;
 let activeRun = null;
 let modelOptions = [];
-$("score").parentElement.querySelector("small").textContent = "Mean check score / 100";
+const metric = (value, digits = 1, unit = "") => value == null ? "—" : Number(value).toFixed(digits) + unit;
+const benchmarkLabel = (version) => version?.startsWith("inspect-") ? version : `legacy rubric v${version}`;
+$("score").parentElement.querySelector("small").textContent = "Overall capability / 100";
 
 function setState(message, live = false) {
   $("state").textContent = message;
@@ -36,6 +38,10 @@ async function startRun() {
   const payload = await response.json();
   if (!response.ok) { $("note").textContent = payload.detail; return; }
   activeRun = payload.id;
+  $("score").textContent = "—";
+  $("reviewTitle").textContent = "Performance review";
+  $("reviewSummary").textContent = "Inspect AI is running the selected samples." ;
+  $("reviewBody").innerHTML = "";
   $("run").disabled = true; $("cancel").disabled = false; $("empty").style.display = "none";
   setState("Benchmark running…", true);
   timer = setInterval(pollRun, 250);
@@ -53,8 +59,8 @@ async function pollRun() {
   if (payload.score !== null && payload.score !== undefined) $("score").textContent = Number(payload.score).toFixed(1);
   if (payload.status !== "running") {
     clearInterval(timer); timer = null; $("run").disabled = false; $("cancel").disabled = true;
-    setState(payload.status === "complete" ? "Complete" : `Failed: ${payload.error || payload.status}`);
-    if (payload.status === "complete") fetch(`/api/runs/${activeRun}/review`).then((r) => r.json()).then(renderReview);
+    setState(payload.error ? `Incomplete: ${payload.error}` : payload.current);
+    if (payload.completed) fetch(`/api/runs/${activeRun}/review`).then((r) => r.json()).then(renderReview);
     loadHistory();
   }
 }
@@ -62,13 +68,13 @@ async function pollRun() {
 async function cancelRun() {
   if (!activeRun) return;
   await fetch(`/api/runs/${activeRun}/cancel`, {method: "POST"});
-  clearInterval(timer); timer = null; setState("Cancelled"); $("run").disabled = false; $("cancel").disabled = true;
+  await pollRun();
 }
 
 async function loadHistory() {
   const payload = await fetch("/api/history").then((r) => r.json());
   const profileLabel = (profile) => ({"light-v1":"Light · v1", "standard-v2":"Standard · v2", "heavy-v3":"Heavy · v3"}[profile] || "Not recorded");
-  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.provider_name || "Unknown")}</td><td>${escapeHtml(run.model)}</td><td><span>${escapeHtml(profileLabel(run.profile))}</span>${run.benchmark_version ? `<small style="display:block;color:var(--muted)">rubric v${escapeHtml(run.benchmark_version)}</small>` : ""}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="8">No saved runs yet</td></tr>';
+  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.provider_name || "Unknown")}</td><td>${escapeHtml(run.model)}</td><td><span>${escapeHtml(profileLabel(run.profile))}</span>${run.benchmark_version ? `<small style="display:block;color:var(--muted)">${escapeHtml(benchmarkLabel(run.benchmark_version))}</small>` : ""}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="8">No saved runs yet</td></tr>';
 }
 
 $("discover").addEventListener("click", discover);
@@ -116,9 +122,12 @@ document.head.appendChild(reviewStyle);
 function renderReview(report) {
   $("reviewTitle").textContent = `Performance review · ${report.model} (${report.provider})`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
-  const categories = Object.entries(report.categories || {}).map(([name, item]) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${Number(item.score).toFixed(1)}</td><td>${Number(item.latency_s).toFixed(2)}s</td><td>${Number(item.tps).toFixed(1)}</td><td>${item.checks}</td></tr>`).join("");
-  const checks = (report.checks || []).map((check) => `<tr><td>${check.ordinal}</td><td>${escapeHtml(categoryLabel(check.category))}</td><td>${Number(check.score).toFixed(1)}</td><td>${Number(check.latency_s).toFixed(2)}s</td><td>${Number(check.tps).toFixed(1)}</td><td><details><summary>View prompt and response</summary><b>Prompt:</b><br>${escapeHtml(check.prompt)}<br><b>Response:</b><br>${escapeHtml(check.answer)}<br><b>Rubric:</b> ${escapeHtml(check.note)}</details></td></tr>`).join("");
-  $("reviewSummary").textContent = `Overall ${Number(report.score).toFixed(1)} / 100 · ${report.profile} · rubric ${report.benchmark_version}. Overall score is the arithmetic mean of individual check scores. Agentic checks use simulated tool results.`;
+  const categories = Object.entries(report.categories || {}).map(([name, item]) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${Number(item.score).toFixed(1)}</td><td>${metric(item.latency_s, 2, "s")}</td><td>${metric(item.tps)}</td><td>${item.checks}</td></tr>`).join("");
+  const checks = (report.checks || []).map((check) => `<tr><td>${check.ordinal}</td><td>${escapeHtml(categoryLabel(check.category))}</td><td>${Number(check.score).toFixed(1)}</td><td>${metric(check.latency_s, 2, "s")}</td><td>${metric(check.tps)}</td><td><details><summary>View prompt and response</summary><b>Prompt:</b><br>${escapeHtml(check.prompt)}<br><b>Response:</b><br>${escapeHtml(check.answer)}<br><b>Scoring source:</b> ${escapeHtml(check.note)}</details></td></tr>`).join("");
+  const summary = report.benchmark_version.startsWith("inspect-")
+    ? "Overall gives equal weight to reasoning, coding, and agentic performance. Speed is reported separately."
+    : "This run used the original app rubric.";
+  $("reviewSummary").textContent = `Overall ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}`;
   $("reviewBody").innerHTML = `<h3>Category averages</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>Score / 100</th><th>Avg latency</th><th>Avg tok/s</th><th>Checks</th></tr></thead><tbody>${categories}</tbody></table></div><h3 style="margin-top:22px">Individual checks</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>Score / 100</th><th>Latency</th><th>tok/s</th><th>Evidence</th></tr></thead><tbody>${checks}</tbody></table></div>`;
 }
 
@@ -127,17 +136,17 @@ async function compareSelectedRuns() {
   if (ids.length !== 2) { $("reviewTitle").textContent = "Select exactly two runs to compare"; return; }
   const reports = await Promise.all(ids.map((id) => fetch(`/api/runs/${id}/review`).then((r) => r.json())));
   const [left, right] = reports;
-  if (left.profile === "legacy" || right.profile === "legacy" || left.benchmark_version === "legacy" || right.benchmark_version === "legacy" || left.profile !== right.profile || left.benchmark_version !== right.benchmark_version) {
+  if (left.status !== "complete" || right.status !== "complete" || left.profile === "legacy" || right.profile === "legacy" || left.benchmark_version === "legacy" || right.benchmark_version === "legacy" || left.profile !== right.profile || left.benchmark_version !== right.benchmark_version) {
     $("reviewTitle").textContent = "Runs are not directly comparable";
-    $("reviewSummary").textContent = "Choose runs with the same benchmark profile and rubric version for an apples-to-apples comparison.";
+    $("reviewSummary").textContent = "Choose two completed runs with the same benchmark profile and version for an apples-to-apples comparison.";
     $("reviewBody").innerHTML = "";
     return;
   }
   $("reviewTitle").textContent = `Side-by-side · ${left.provider}: ${left.model} vs ${right.provider}: ${right.model}`;
-  $("reviewSummary").textContent = `${left.profile_label} · rubric ${left.benchmark_version} · Overall scores are means of the same individual checks.`;
+  $("reviewSummary").textContent = `${left.profile_label} · ${benchmarkLabel(left.benchmark_version)} · Same profile and scoring rules.`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
-  const dimensionRows = [...new Set([...Object.keys(left.categories), ...Object.keys(right.categories)])].map((name) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${left.categories[name] ? Number(left.categories[name].score).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].score).toFixed(1) : "—"}</td><td>${left.categories[name] ? Number(left.categories[name].tps).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].tps).toFixed(1) : "—"}</td></tr>`).join("");
-  const checkRows = left.checks.map((a, index) => { const b = right.checks[index]; return `<tr><td>${a.ordinal}</td><td>${escapeHtml(categoryLabel(a.category))}</td><td>${Number(a.score).toFixed(1)}</td><td>${b ? Number(b.score).toFixed(1) : "—"}</td><td>${Number(a.latency_s).toFixed(2)}s</td><td>${b ? Number(b.latency_s).toFixed(2) + "s" : "—"}</td></tr>`; }).join("");
+  const dimensionRows = [...new Set([...Object.keys(left.categories), ...Object.keys(right.categories)])].map((name) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${left.categories[name] ? Number(left.categories[name].score).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].score).toFixed(1) : "—"}</td><td>${left.categories[name] ? metric(left.categories[name].tps) : "—"}</td><td>${right.categories[name] ? metric(right.categories[name].tps) : "—"}</td></tr>`).join("");
+  const checkRows = left.checks.map((a, index) => { const b = right.checks[index]; return `<tr><td>${a.ordinal}</td><td>${escapeHtml(categoryLabel(a.category))}</td><td>${Number(a.score).toFixed(1)}</td><td>${b ? Number(b.score).toFixed(1) : "—"}</td><td>${metric(a.latency_s, 2, "s")}</td><td>${metric(b?.latency_s, 2, "s")}</td></tr>`; }).join("");
   $("reviewBody").innerHTML = `<div class="metrics"><div class="metric"><small>${escapeHtml(left.model)} overall</small><strong>${Number(left.score).toFixed(1)}</strong></div><div class="metric"><small>${escapeHtml(right.model)} overall</small><strong>${Number(right.score).toFixed(1)}</strong></div></div><h3>Category scores and speed</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} tok/s</th><th>${escapeHtml(right.model)} tok/s</th></tr></thead><tbody>${dimensionRows}</tbody></table></div><h3 style="margin-top:22px">Check-by-check scores and latency</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} latency</th><th>${escapeHtml(right.model)} latency</th></tr></thead><tbody>${checkRows}</tbody></table></div>`;
 }
 $("compareSelected").addEventListener("click", compareSelectedRuns);
