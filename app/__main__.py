@@ -8,6 +8,8 @@ import webbrowser
 
 import uvicorn
 
+from .server import VERSION, app
+
 
 def available_port(preferred: int) -> int:
     for port in range(preferred, preferred + 20):
@@ -42,5 +44,14 @@ def open_when_ready():
 
 if args.open_browser:
     threading.Thread(target=open_when_ready, daemon=True).start()
-print(f"LLM Reality Check v0.3.4: {url}", flush=True)
-uvicorn.run("app.server:app", host=args.host, port=port)
+server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=port))
+
+
+def request_shutdown():
+    server.should_exit = True
+
+
+if args.host in {"127.0.0.1", "localhost", "::1"}:
+    app.state.request_shutdown = request_shutdown
+print(f"LLM Reality Check v{VERSION}: {url}", flush=True)
+server.run()

@@ -7,19 +7,20 @@ import json
 import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
+from contextlib import suppress
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
 from .benchmark import BENCHMARK_VERSION, PROFILES, check_outcome, profile_tasks
 
 ROOT = Path(__file__).parent
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -29,6 +30,7 @@ FERNET = Fernet(SECRET_FILE.read_bytes())
 app = FastAPI(title="LLM Reality Check", version=VERSION)
 RUNS: dict[str, dict[str, Any]] = {}
 WORKERS: dict[str, asyncio.subprocess.Process] = {}
+RUN_TASKS: dict[str, asyncio.Task] = {}
 
 
 def db():
@@ -183,6 +185,8 @@ async def models(endpoint: str, api_key: str = ""):
 
 @app.post("/api/runs")
 async def start_run(request: RunRequest):
+    if getattr(app.state, "quitting", False):
+        raise HTTPException(409, "LLM Reality Check is shutting down.")
     endpoint = normalize_endpoint(request.endpoint)
     parts = urlsplit(endpoint)
     if parts.scheme not in {"http", "https"} or not parts.netloc:
@@ -208,7 +212,9 @@ async def start_run(request: RunRequest):
             (run_id, endpoint, request.model, "running", request.profile, BENCHMARK_VERSION, request.name.strip()),
         )
     RUNS[run_id] = run
-    asyncio.create_task(run_benchmark(run_id, endpoint, request))
+    task = asyncio.create_task(run_benchmark(run_id, endpoint, request))
+    RUN_TASKS[run_id] = task
+    task.add_done_callback(lambda _: RUN_TASKS.pop(run_id, None))
     return run
 
 
@@ -293,7 +299,8 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
         issues.append("The dashboard could not finish the Inspect run.")
     finally:
         if worker and worker.returncode is None:
-            worker.terminate()
+            with suppress(ProcessLookupError):
+                worker.terminate()
             await worker.wait()
         WORKERS.pop(run_id, None)
         if run["cancel_requested"]:
@@ -419,11 +426,39 @@ async def cancel_run(run_id: str):
                 worker.send_signal(signal.SIGINT)
                 await asyncio.wait_for(worker.wait(), timeout=15)
             except TimeoutError:
-                worker.kill()
+                with suppress(ProcessLookupError):
+                    worker.kill()
                 await worker.wait()
             except ProcessLookupError:
                 pass
     return run
+
+
+@app.post("/api/app/quit")
+async def quit_app(request: Request, background_tasks: BackgroundTasks):
+    shutdown = getattr(app.state, "request_shutdown", None)
+    if shutdown is None:
+        raise HTTPException(404, "Quit is available when the app is running locally.")
+    expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if (
+        request.url.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or request.headers.get("origin") != expected_origin
+        or request.headers.get("x-llmrc-action") != "quit"
+    ):
+        raise HTTPException(403, "Quit must be requested from the local dashboard.")
+    if getattr(app.state, "quitting", False):
+        raise HTTPException(409, "LLM Reality Check is already shutting down.")
+
+    app.state.quitting = True
+    try:
+        for run_id, task in list(RUN_TASKS.items()):
+            await cancel_run(run_id)
+            await asyncio.shield(task)
+    except Exception:
+        app.state.quitting = False
+        raise
+    background_tasks.add_task(shutdown)
+    return {"status": "quitting"}
 
 
 @app.get("/api/history")
@@ -470,5 +505,9 @@ def index():
     )
     page = page.replace("<select><option>Developer & Agent · v1</option></select>", f'<select id="profile">{options}</select>')
     page = page.replace('<button class="secondary" id="discover">↻ Load models</button>', '<div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="discover">↻ Load models</button><button class="secondary" id="searchModels">⌕ Search models</button></div><input id="modelSearch" placeholder="Filter models by name…" style="display:block;margin-top:8px">')
+    quit_control = ""
+    if getattr(app.state, "request_shutdown", None) is not None:
+        quit_control = '<button id="quitApp" class="secondary" type="button">Quit LLMRC</button>'
+    page = page.replace("<!-- app-control -->", quit_control)
     start, end = page.index("<script>"), page.index("</script>") + len("</script>")
     return page[:start] + '<script src="/app.js"></script>' + page[end:]

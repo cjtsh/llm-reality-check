@@ -5,6 +5,7 @@ let modelOptions = [];
 let providers = [];
 let modelRequest = null;
 let runInProgress = false;
+let sessionEnded = false;
 const metric = (value, digits = 1, unit = "") => value == null ? "—" : Number(value).toFixed(digits) + unit;
 const benchmarkLabel = (version) => version?.startsWith("inspect-") ? version : `legacy rubric v${version}`;
 $("score").parentElement.querySelector("small").textContent = "Raw benchmark score / 100";
@@ -98,6 +99,25 @@ async function requestJson(url, options) {
   return payload;
 }
 
+$("quitApp")?.addEventListener("click", async () => {
+  if (!window.confirm("Quit LLM Reality Check? Any running benchmark will be cancelled.")) return;
+  $("quitApp").disabled = true;
+  $("sessionStatus").textContent = "Quitting LLM Reality Check…";
+  try {
+    await requestJson("/api/app/quit", {method: "POST", headers: {"X-LLMRC-Action": "quit"}});
+    sessionEnded = true;
+    clearInterval(timer);
+    timer = null;
+    modelRequest?.abort();
+    document.querySelectorAll("button, input, select").forEach((control) => { control.disabled = true; });
+    setState("Local session ended");
+    $("sessionStatus").textContent = "Session ended. Reopen LLM Reality Check from Applications to start again.";
+  } catch (error) {
+    $("sessionStatus").textContent = error.message;
+    $("quitApp").disabled = false;
+  }
+});
+
 async function discover() {
   const provider = selectedProvider();
   if (!provider) return;
@@ -160,11 +180,13 @@ async function startRun() {
 
 async function pollRun() {
   const response = await fetch(`/api/runs/${activeRun}`).catch(() => null);
+  if (sessionEnded) return;
   if (!response?.ok) {
     setState("Lost connection to the dashboard. Checking again…");
     return;
   }
   const payload = await response.json();
+  if (sessionEnded) return;
   const finished = Math.max(payload.finished ?? 0, payload.completed);
   const percent = finished / payload.total * 100;
   $("bar").style.width = `${percent}%`;
