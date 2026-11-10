@@ -1,8 +1,10 @@
-"""Small deterministic developer/agent profile used by the v0.2.1 runner.
+"""Small deterministic developer/agent profile used by the v0.2.2 runner.
 
 The task schema is deliberately simple so it can be migrated to native Inspect
 tasks without changing the public run API.
 """
+import json
+import re
 BASE_TASKS = [
     ("reasoning", "What is 17 * 19? Reply with only the integer.", "323"),
     ("reasoning", "A farmer has 3 chickens and buys 4 more. How many chickens? Reply with only the integer.", "7"),
@@ -50,8 +52,52 @@ def profile_tasks(profile):
 
 def score(category, expected, answer):
     clean = answer.strip()
-    if expected is not None:
-        return 1.0 if clean == expected else 0.0
+    if expected is not None and clean == expected:
+        return 1.0
+
+    if category == "structured" and expected is not None:
+        try:
+            wanted = json.loads(expected)
+            candidate = clean.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            actual = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            return 0.0
+        if isinstance(wanted, dict) and isinstance(actual, dict) and wanted:
+            matched = sum(actual.get(key) == value for key, value in wanted.items())
+            return 0.2 + 0.8 * matched / len(wanted)
+        return 0.2 if actual == wanted else 0.0
+
     if category == "planning":
-        return 1.0 if all(f"{i}." in clean for i in (1, 2, 3)) else 0.0
+        steps = re.findall(r"(?m)^\s*(?:\d+[.)]|[-*])\s+", clean)
+        return min(len(steps), 3) / 3
+
+    if expected is not None and category == "reasoning" and re.fullmatch(r"-?\d+(?:\.\d+)?", expected):
+        return 0.9 if re.search(rf"(?<!\w){re.escape(expected)}(?!\w)", clean) else 0.0
+
+    if expected is not None and category == "instruction":
+        return 0.9 if re.search(rf"\b{re.escape(expected)}\b", clean, re.IGNORECASE) else 0.0
+
+    if category == "tool-use" and expected:
+        if re.search(rf"\b{re.escape(expected)}\b", clean, re.IGNORECASE):
+            return 0.9
+        alternatives = {
+            "filesystem": ("file", "cat", "open", "terminal", "shell"),
+            "shell": ("terminal", "command line", "bash", "zsh"),
+        }
+        return 0.7 if any(term in clean.lower() for term in alternatives.get(expected, ())) else 0.0
+
+    if category == "coding" and expected and expected.startswith("["):
+        compact = re.sub(r"\s+", "", clean.lower())
+        square_op = any(op in compact for op in ("x*x", "x**2", "x^2"))
+        if square_op and all(str(number) in clean for number in (1, 2, 3)):
+            return 0.8
+
+    if category == "uncertainty" and expected:
+        if clean.lower().startswith(expected.lower()):
+            return 0.9
+
+    if expected and category in {"coding", "context"}:
+        if re.search(rf"(?<!\w){re.escape(expected)}(?!\w)", clean, re.IGNORECASE):
+            return 0.9
+
     return 0.0

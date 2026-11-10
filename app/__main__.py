@@ -21,5 +21,5 @@ parser.add_argument("--host", default="127.0.0.1")
 parser.add_argument("--port", type=int, default=int(os.getenv("LLM_REALITY_CHECK_PORT", os.getenv("PORT", "8765"))))
 args = parser.parse_args()
 port = available_port(args.port) if args.host in {"127.0.0.1", "localhost"} else args.port
-print(f"LLM Reality Check v0.2.1: http://127.0.0.1:{port}", flush=True)
+print(f"LLM Reality Check v0.2.2: http://127.0.0.1:{port}", flush=True)
 uvicorn.run("app.server:app", host=args.host, port=port)

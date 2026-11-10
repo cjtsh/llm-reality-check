@@ -49,7 +49,7 @@ async function pollRun() {
   $("eta").textContent = payload.completed ? `${Math.max(0, (payload.elapsed / payload.completed) * (payload.total - payload.completed)).toFixed(1)}s` : "calculating";
   $("current").textContent = payload.current || payload.status;
   $("rate").textContent = payload.tps ? `${Number(payload.tps).toFixed(1)} tok/s` : "— tok/s";
-  if (payload.score !== null && payload.score !== undefined) $("score").textContent = Number(payload.score).toFixed(1);
+  if (payload.score !== null && payload.score !== undefined) $("score").textContent = Number(payload.score).toFixed(0);
   if (payload.status !== "running") { clearInterval(timer); timer = null; $("run").disabled = false; $("cancel").disabled = true; setState(payload.status === "complete" ? "Complete" : `Failed: ${payload.error || payload.status}`); loadHistory(); }
 }
 

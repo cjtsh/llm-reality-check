@@ -16,7 +16,7 @@ from cryptography.fernet import Fernet
 from .benchmark import profile_tasks, score
 
 ROOT = Path(__file__).parent
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -166,8 +166,8 @@ async def run_benchmark(run_id: str, endpoint: str, model: str, api_key: str, pr
                 RUNS[run_id]["tps"] = round(RUNS[run_id]["tokens"] / max(time.time() - RUNS[run_id]["started"], 0.001), 1)
                 RUNS[run_id]["completed"] = index + 1
                 RUNS[run_id]["categories"][category] = round(points * 100, 1)
-        final_score = sum(points for _, points in results) / len(tasks) * 100
-        RUNS[run_id].update(status="complete", score=round(final_score, 1), elapsed=round(time.time() - RUNS[run_id]["started"], 2), current="Complete")
+        final_score = round(sum(points for _, points in results) / len(tasks) * 100)
+        RUNS[run_id].update(status="complete", score=final_score, elapsed=round(time.time() - RUNS[run_id]["started"], 2), current="Complete")
         with db() as conn:
             conn.execute("UPDATE runs SET status=?, score=?, tps=? WHERE id=?", ("complete", final_score, RUNS[run_id]["tps"], run_id))
     except Exception as exc:
