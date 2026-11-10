@@ -67,7 +67,8 @@ async function cancelRun() {
 
 async function loadHistory() {
   const payload = await fetch("/api/history").then((r) => r.json());
-  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.model)}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="6">No saved runs yet</td></tr>';
+  const profileLabel = (profile) => ({"light-v1":"Light · v1", "standard-v2":"Standard · v2", "heavy-v3":"Heavy · v3"}[profile] || "Not recorded");
+  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.provider_name || "Unknown")}</td><td>${escapeHtml(run.model)}</td><td><span>${escapeHtml(profileLabel(run.profile))}</span>${run.benchmark_version ? `<small style="display:block;color:var(--muted)">rubric v${escapeHtml(run.benchmark_version)}</small>` : ""}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="8">No saved runs yet</td></tr>';
 }
 
 $("discover").addEventListener("click", discover);
@@ -99,7 +100,7 @@ const historyActions = document.createElement("span");
 historyActions.style.cssText = "float:right;display:flex;gap:8px";
 historyActions.innerHTML = '<button class="secondary" id="compareSelected">Compare selected</button><button class="secondary" id="deleteSelected">Delete selected</button><button class="secondary" id="deleteAll">Delete all</button>';
 historyTitle.appendChild(historyActions);
-historyPanel.querySelector("thead tr").innerHTML = "<th></th><th>Model</th><th>Status</th><th>Score</th><th>Avg TPS</th><th>Created</th>";
+historyPanel.querySelector("thead tr").innerHTML = "<th></th><th>Provider</th><th>Model</th><th>Test profile</th><th>Status</th><th>Score</th><th>Avg TPS</th><th>Created</th>";
 $("deleteSelected").addEventListener("click", async () => { const ids = [...document.querySelectorAll(".history-check:checked")].map((x) => x.dataset.id); await Promise.all(ids.map((id) => fetch(`/api/history/${id}`, {method: "DELETE"}))); loadHistory(); });
 $("deleteAll").addEventListener("click", async () => { await fetch("/api/history", {method: "DELETE"}); loadHistory(); });
 
@@ -113,7 +114,7 @@ reviewStyle.textContent = ".review-table{width:100%;border-collapse:collapse;fon
 document.head.appendChild(reviewStyle);
 
 function renderReview(report) {
-  $("reviewTitle").textContent = `Performance review · ${report.model}`;
+  $("reviewTitle").textContent = `Performance review · ${report.model} (${report.provider})`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
   const categories = Object.entries(report.categories || {}).map(([name, item]) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${Number(item.score).toFixed(1)}</td><td>${Number(item.latency_s).toFixed(2)}s</td><td>${Number(item.tps).toFixed(1)}</td><td>${item.checks}</td></tr>`).join("");
   const checks = (report.checks || []).map((check) => `<tr><td>${check.ordinal}</td><td>${escapeHtml(categoryLabel(check.category))}</td><td>${Number(check.score).toFixed(1)}</td><td>${Number(check.latency_s).toFixed(2)}s</td><td>${Number(check.tps).toFixed(1)}</td><td><details><summary>View prompt and response</summary><b>Prompt:</b><br>${escapeHtml(check.prompt)}<br><b>Response:</b><br>${escapeHtml(check.answer)}<br><b>Rubric:</b> ${escapeHtml(check.note)}</details></td></tr>`).join("");
@@ -132,8 +133,8 @@ async function compareSelectedRuns() {
     $("reviewBody").innerHTML = "";
     return;
   }
-  $("reviewTitle").textContent = `Side-by-side · ${left.model} vs ${right.model}`;
-  $("reviewSummary").textContent = `${left.profile} · rubric ${left.benchmark_version} · Overall scores are means of the same individual checks.`;
+  $("reviewTitle").textContent = `Side-by-side · ${left.provider}: ${left.model} vs ${right.provider}: ${right.model}`;
+  $("reviewSummary").textContent = `${left.profile_label} · rubric ${left.benchmark_version} · Overall scores are means of the same individual checks.`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
   const dimensionRows = [...new Set([...Object.keys(left.categories), ...Object.keys(right.categories)])].map((name) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${left.categories[name] ? Number(left.categories[name].score).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].score).toFixed(1) : "—"}</td><td>${left.categories[name] ? Number(left.categories[name].tps).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].tps).toFixed(1) : "—"}</td></tr>`).join("");
   const checkRows = left.checks.map((a, index) => { const b = right.checks[index]; return `<tr><td>${a.ordinal}</td><td>${escapeHtml(categoryLabel(a.category))}</td><td>${Number(a.score).toFixed(1)}</td><td>${b ? Number(b.score).toFixed(1) : "—"}</td><td>${Number(a.latency_s).toFixed(2)}s</td><td>${b ? Number(b.latency_s).toFixed(2) + "s" : "—"}</td></tr>`; }).join("");

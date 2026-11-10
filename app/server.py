@@ -14,10 +14,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
-from .benchmark import profile_tasks, score
+from .benchmark import PROFILES, profile_tasks, score
 
 ROOT = Path(__file__).parent
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -31,12 +31,13 @@ SECRETS: dict[str, str] = {}  # Temporary v0.1.8 memory store; Keychain is the p
 
 def db():
     conn = sqlite3.connect(DB)
-    conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, endpoint TEXT, model TEXT, status TEXT, score REAL, tps REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, benchmark_version TEXT)")
-    for column in ("tps REAL", "profile TEXT", "benchmark_version TEXT"):
+    conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, endpoint TEXT, model TEXT, status TEXT, score REAL, tps REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, benchmark_version TEXT, provider_name TEXT)")
+    for column in ("tps REAL", "profile TEXT", "benchmark_version TEXT", "provider_name TEXT"):
         try: conn.execute(f"ALTER TABLE runs ADD COLUMN {column}")
         except sqlite3.OperationalError: pass
     conn.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, name TEXT UNIQUE, endpoint TEXT, api_key BLOB, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
     conn.execute("CREATE TABLE IF NOT EXISTS check_results (run_id TEXT, ordinal INTEGER, category TEXT, prompt TEXT, answer TEXT, score REAL, latency_s REAL, tokens INTEGER, tps REAL, note TEXT, PRIMARY KEY(run_id, ordinal))")
+    conn.execute("UPDATE runs SET provider_name=(SELECT name FROM providers WHERE providers.endpoint=runs.endpoint ORDER BY updated_at DESC LIMIT 1) WHERE provider_name IS NULL")
     conn.commit()
     return conn
 
@@ -136,7 +137,7 @@ async def start_run(request: RunRequest):
     RUNS[run_id] = {"id": run_id, "status": "running", "completed": 0, "total": len(tasks), "started": time.time(), "model": request.model, "profile": request.profile, "benchmark_version": VERSION, "score": None, "categories": {}, "checks": [], "current": "Starting", "tokens": 0, "tps": None}
     SECRETS[run_id] = request.api_key
     with db() as conn:
-        conn.execute("INSERT INTO runs (id, endpoint, model, status, profile, benchmark_version) VALUES (?, ?, ?, ?, ?, ?)", (run_id, endpoint, request.model, "running", request.profile, VERSION))
+        conn.execute("INSERT INTO runs (id, endpoint, model, status, profile, benchmark_version, provider_name) VALUES (?, ?, ?, ?, ?, ?, ?)", (run_id, endpoint, request.model, "running", request.profile, VERSION, request.name.strip()))
     asyncio.create_task(run_benchmark(run_id, endpoint, request.model, request.api_key, request.profile))
     return RUNS[run_id]
 
@@ -256,7 +257,7 @@ def run_status(run_id: str):
 @app.get("/api/runs/{run_id}/review")
 def run_review(run_id: str):
     with db() as conn:
-        run = conn.execute("SELECT model, profile, benchmark_version, score FROM runs WHERE id=?", (run_id,)).fetchone()
+        run = conn.execute("SELECT model, provider_name, profile, benchmark_version, score FROM runs WHERE id=?", (run_id,)).fetchone()
         if not run:
             raise HTTPException(404, "Run not found")
         rows = conn.execute("SELECT ordinal, category, prompt, answer, score, latency_s, tokens, tps, note FROM check_results WHERE run_id=? ORDER BY ordinal", (run_id,)).fetchall()
@@ -273,7 +274,8 @@ def run_review(run_id: str):
         }
         for category, items in grouped.items()
     }
-    return {"model": run[0], "profile": run[1] or "legacy", "benchmark_version": run[2] or "legacy", "score": run[3], "categories": categories, "checks": checks}
+    profile = run[2]
+    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, {}).get("label", "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "categories": categories, "checks": checks}
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -288,8 +290,8 @@ def cancel_run(run_id: str):
 @app.get("/api/history")
 def history():
     with db() as conn:
-        rows = conn.execute("SELECT id, endpoint, model, status, score, tps, created_at, profile, benchmark_version FROM runs ORDER BY created_at DESC LIMIT 50").fetchall()
-    return {"runs": [dict(zip(("id", "endpoint", "model", "status", "score", "tps", "created_at", "profile", "benchmark_version"), row)) for row in rows]}
+        rows = conn.execute("SELECT id, endpoint, provider_name, model, status, score, tps, created_at, profile, benchmark_version FROM runs ORDER BY created_at DESC LIMIT 50").fetchall()
+    return {"runs": [dict(zip(("id", "endpoint", "provider_name", "model", "status", "score", "tps", "created_at", "profile", "benchmark_version"), row)) for row in rows]}
 
 
 @app.delete("/api/history")

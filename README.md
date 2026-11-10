@@ -2,13 +2,15 @@
 
 Practical, reproducible benchmarking for local and cloud LLMs.
 
-Version 0.2.3 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
+Version 0.2.4 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
 
 ## Benchmark scoring
 
 Each check receives a rubric score from 0 to 100 for its category, such as reasoning, coding, tool use, planning, structured output, or uncertainty handling. The overall score is the arithmetic mean of the individual check scores (`sum(check scores) / number of checks`), not a count of checks passed. The dashboard reports category averages, per-check scores, latency, and tokens per second. Select two runs to compare them; comparisons require the same profile and rubric version.
 
 The agentic check measures function selection, arguments, and use of a simulated tool result. It does not grant models access to the host filesystem or execute arbitrary test commands.
+
+Each run records the provider name, model identifier, test profile, and rubric version. Runs without historical profile data are labeled "Not recorded" rather than inferred.
 
 ## Local development
 

@@ -1,4 +1,4 @@
-"""Reproducible v0.2.3 model checks and deterministic per-check scoring rubrics."""
+"""Reproducible v0.2.4 model checks and deterministic per-check scoring rubrics."""
 import ast
 import json
 import re
