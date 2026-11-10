@@ -1,4 +1,4 @@
-"""Small deterministic developer/agent profile used by the v0.1.12 runner.
+"""Small deterministic developer/agent profile used by the v0.2.1 runner.
 
 The task schema is deliberately simple so it can be migrated to native Inspect
 tasks without changing the public run API.

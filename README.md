@@ -2,7 +2,7 @@
 
 Practical, reproducible benchmarking for local and cloud LLMs.
 
-Version 0.1.1 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
+Version 0.2.1 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
 
 ## Local development
 

@@ -16,7 +16,7 @@ from cryptography.fernet import Fernet
 from .benchmark import profile_tasks, score
 
 ROOT = Path(__file__).parent
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
