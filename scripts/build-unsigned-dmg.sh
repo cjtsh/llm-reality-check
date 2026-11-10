@@ -6,6 +6,7 @@ APP="$OUT/LLM Reality Check.app"
 CONTENTS="$APP/Contents"
 RUNTIME="$CONTENTS/Resources/runtime"
 DMG="$ROOT/LLM-Reality-Check-0.2.0-unsigned.dmg"
+DMG_ROOT="$ROOT/build/dmg"
 
 command -v uv >/dev/null || { echo "uv is required to build the app runtime" >&2; exit 1; }
 command -v python3.12 >/dev/null || { echo "Python 3.12 is required to build the app runtime" >&2; exit 1; }
@@ -60,7 +61,21 @@ rm -rf "$ICONSET"
 cp -R "$ROOT/app" "$ROOT/requirements.txt" "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/DISCLAIMER.md" "$RUNTIME/"
 uv venv --python 3.12 "$RUNTIME/.venv"
 uv pip install --python "$RUNTIME/.venv/bin/python" -r "$RUNTIME/requirements.txt"
-cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/DISCLAIMER.md" "$OUT/"
-ln -s /Applications "$OUT/Applications"
-hdiutil create -volname "LLM Reality Check 0.2.0" -srcfolder "$OUT" -ov -format UDZO "$DMG"
+find "$RUNTIME" -name __pycache__ -type d -prune -exec rm -rf {} +
+find "$RUNTIME" -name '._*' -type f -delete
+rm -rf "$DMG_ROOT"
+mkdir -p "$DMG_ROOT"
+pkgbuild --component "$APP" --install-location /Applications \
+  "$DMG_ROOT/LLM Reality Check Installer.pkg"
+cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/DISCLAIMER.md" "$DMG_ROOT/"
+cat > "$DMG_ROOT/Install.txt" <<'INSTALL'
+LLM Reality Check 0.2.0
+
+Double-click “LLM Reality Check Installer.pkg” and follow the Installer prompts.
+After installation, open LLM Reality Check from the Applications folder.
+
+This installer is unsigned. If macOS blocks it, Control-click the package,
+choose Open, then confirm Open in the security prompt.
+INSTALL
+hdiutil create -volname "LLM Reality Check Installer" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
 echo "Created $DMG"
