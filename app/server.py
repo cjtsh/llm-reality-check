@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from .benchmark import BENCHMARK_VERSION, PROFILES, check_outcome, profile_tasks
 
 ROOT = Path(__file__).parent
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -34,7 +34,7 @@ WORKERS: dict[str, asyncio.subprocess.Process] = {}
 def db():
     conn = sqlite3.connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, endpoint TEXT, model TEXT, status TEXT, score REAL, tps REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, benchmark_version TEXT, provider_name TEXT)")
-    for column in ("tps REAL", "profile TEXT", "benchmark_version TEXT", "provider_name TEXT"):
+    for column in ("tps REAL", "profile TEXT", "benchmark_version TEXT", "provider_name TEXT", "activity_json TEXT"):
         try: conn.execute(f"ALTER TABLE runs ADD COLUMN {column}")
         except sqlite3.OperationalError: pass
     conn.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, name TEXT UNIQUE, endpoint TEXT, api_key BLOB, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
@@ -69,6 +69,7 @@ class Provider(BaseModel):
 class RunRequest(Provider):
     model: str = Field(min_length=1, max_length=200)
     profile: str = "standard-v2"
+    stream_activity: bool | None = None
 
 
 class ProviderUpdate(Provider):
@@ -188,7 +189,7 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
         else:
             worker.stdin.write(json.dumps({
                 "endpoint": endpoint, "model": request.model,
-                "api_key": request.api_key, "profile": request.profile,
+                "api_key": request.api_key, "profile": request.profile, "stream_activity": request.stream_activity,
             }).encode())
             await worker.stdin.drain()
         worker.stdin.close()
@@ -209,17 +210,28 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
                     run["tps"] = mean(measured_speeds)
             if "issue" in event:
                 issues.append(event["issue"])
+            now = time.monotonic()
+            if "stream_enabled" in event:
+                run["stream_enabled"] = event["stream_enabled"]
+            if event.get("reset_stream"):
+                run.update(last_stream_update=None, stream_tokens=None)
+            if event.get("stream_progress"):
+                if run.get("last_stream_update") is None:
+                    event["phase"] = "Receiving model output"
+                run.update(last_stream_update=now, stream_tokens=event.get("stream_tokens"))
             if "phase" in event or "issue" in event:
-                now = time.monotonic()
                 run.update(phase=event.get("phase") or event["issue"], phase_started=now)
                 label = run["phase"]
                 if event.get("finished") and event.get("duration") is not None:
                     label += f" in {event['duration']:.1f}s"
-                run["activity"] = (run["activity"] + [{
+                run["activity"].append({
                     "elapsed": round(now - run["started"]),
                     "label": label,
                     "sample": run["sample"],
-                }])[-8:]
+                })
+                run["activity"] = run["activity"][-512:]
+                with sqlite3.connect(DB) as conn:
+                    conn.execute("UPDATE runs SET activity_json=? WHERE id=?", (json.dumps(run["activity"]), run_id))
             for check in event.get("checks", []):
                 checks.append(check)
                 with db() as conn:
@@ -266,7 +278,11 @@ def run_status(run_id: str):
         raise HTTPException(404, "Run not found in active session")
     data = dict(RUNS[run_id])
     data["elapsed"] = round(time.monotonic() - data["started"], 1) if data["status"] == "running" else data.get("elapsed", 0)
-    data["phase_elapsed"] = round(time.monotonic() - data["phase_started"], 1)
+    now = time.monotonic()
+    data["phase_elapsed"] = round(now - data["phase_started"], 1)
+    data["activity"] = data["activity"][-8:]
+    last_stream_update = data.pop("last_stream_update", None)
+    data["stream_idle"] = round(now - last_stream_update, 1) if last_stream_update is not None else None
     return data
 
 
@@ -315,7 +331,7 @@ def set_frontier_reference(run_id: str):
 @app.get("/api/runs/{run_id}/review")
 def run_review(run_id: str):
     with db() as conn:
-        run = conn.execute("SELECT model, provider_name, profile, benchmark_version, score, status FROM runs WHERE id=?", (run_id,)).fetchone()
+        run = conn.execute("SELECT model, provider_name, profile, benchmark_version, score, status, activity_json FROM runs WHERE id=?", (run_id,)).fetchone()
         if not run:
             raise HTTPException(404, "Run not found")
         reference = frontier_references(conn).get(run[3])
@@ -341,7 +357,7 @@ def run_review(run_id: str):
             check["outcome"] = check_outcome(check["score"])
             outcomes[check["outcome"]] += 1
         outcomes["ungraded"] += sum(len(task.ids) for task in profile_tasks(profile)) - len(checks)
-    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "frontier": frontier_result(run_id, profile, run[5], run[4], reference), "categories": categories, "checks": checks, "outcomes": outcomes}
+    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "frontier": frontier_result(run_id, profile, run[5], run[4], reference), "categories": categories, "checks": checks, "outcomes": outcomes, "activity": json.loads(run[6]) if run[6] else []}
 
 
 @app.post("/api/runs/{run_id}/cancel")

@@ -23,11 +23,29 @@ function formatOutcomes(outcomes) {
   return parts.join(" · ");
 }
 
+const streamSummary = document.createElement("p");
+streamSummary.style.color = "var(--muted)";
+streamSummary.hidden = true;
+outcomeSummary.after(streamSummary);
+const streamSetting = document.createElement("label");
+streamSetting.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--muted)";
+streamSetting.innerHTML = '<input id="streamActivity" type="checkbox" style="width:auto"> Show live stream activity';
+$("endpoint").parentElement.after(streamSetting);
+function defaultStreamSetting() {
+  try {
+    $("streamActivity").checked = ["localhost", "127.0.0.1", "[::1]"].includes(new URL($("endpoint").value).hostname);
+  } catch {
+    $("streamActivity").checked = false;
+  }
+}
+$("endpoint").addEventListener("change", defaultStreamSetting);
+defaultStreamSetting();
+
 const activityPanel = document.createElement("details");
 activityPanel.hidden = true;
 activityPanel.open = true;
 activityPanel.innerHTML = '<summary>Recent activity</summary><ol id="activityList" style="color:var(--muted);padding-left:24px"></ol>';
-outcomeSummary.after(activityPanel);
+streamSummary.after(activityPanel);
 $("eta").parentElement.querySelector("small").textContent = "Current step";
 $("eta").textContent = "—";
 
@@ -59,12 +77,13 @@ async function discover() {
 }
 
 async function startRun() {
-  const response = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value.trim(), api_key: $("key").value, model: $("model").value || "demo-model", profile: $("profile").value})});
+  const response = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value.trim(), api_key: $("key").value, model: $("model").value || "demo-model", profile: $("profile").value, stream_activity: $("streamActivity").checked})});
   const payload = await response.json();
   if (!response.ok) { $("note").textContent = payload.detail; return; }
   activeRun = payload.id;
   activityPanel.hidden = true;
   outcomeSummary.hidden = true;
+  streamSummary.hidden = true;
   $("activityList").replaceChildren();
   $("score").textContent = "—";
   $("reviewTitle").textContent = "Performance review";
@@ -93,6 +112,17 @@ async function pollRun() {
   if (payload.outcomes) {
     outcomeSummary.textContent = formatOutcomes(payload.outcomes);
     outcomeSummary.hidden = finished === 0;
+  }
+  const waiting = payload.phase === "Waiting for model response";
+  const streaming = payload.phase === "Receiving model output";
+  streamSummary.hidden = payload.status !== "running" || (!waiting && !streaming);
+  if (streaming && payload.stream_idle != null) {
+    const tokens = payload.stream_tokens == null ? "" : ` · ${payload.stream_tokens} output tokens reported`;
+    streamSummary.textContent = `Last stream update ${duration(payload.stream_idle)} ago${tokens}`;
+  } else if (waiting) {
+    streamSummary.textContent = payload.stream_enabled
+      ? "Waiting for the first stream update from the model server."
+      : "Buffered response. The model server reports back when the response is complete.";
   }
   const activity = payload.activity || [];
   activityPanel.hidden = activity.length === 0;
@@ -142,7 +172,7 @@ async function loadProviders() {
   const payload = await fetch("/api/providers").then((r) => r.json());
   const target = $("savedProviders");
   target.innerHTML = payload.providers.length ? payload.providers.map((p) => `<div style="display:flex;gap:8px;align-items:center"><button class="secondary provider-load" data-id="${p.id}">${escapeHtml(p.name)}</button><span style="font-family:monospace;font-size:12px">${escapeHtml(p.endpoint)}</span><button class="secondary provider-delete" data-id="${p.id}">Delete</button></div>`).join("") : "No saved providers yet.";
-  document.querySelectorAll(".provider-load").forEach((button) => button.addEventListener("click", async () => { const p = await fetch(`/api/providers/${button.dataset.id}`).then((r) => r.json()); $("name").value = p.name; $("endpoint").value = p.endpoint; $("key").value = p.api_key; setState(`Loaded ${p.name}`); }));
+  document.querySelectorAll(".provider-load").forEach((button) => button.addEventListener("click", async () => { const p = await fetch(`/api/providers/${button.dataset.id}`).then((r) => r.json()); $("name").value = p.name; $("endpoint").value = p.endpoint; defaultStreamSetting(); $("key").value = p.api_key; setState(`Loaded ${p.name}`); }));
   document.querySelectorAll(".provider-delete").forEach((button) => button.addEventListener("click", async () => { await fetch(`/api/providers/${button.dataset.id}`, {method: "DELETE"}); loadProviders(); }));
 }
 
@@ -223,7 +253,11 @@ function renderReview(report) {
   const outcomes = report.outcomes ? ` ${formatOutcomes(report.outcomes)}.` : "";
   const light = report.profile === "light-v1" ? " Light is a quick check and can reach its ceiling." : "";
   $("reviewSummary").textContent = `Raw ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}${outcomes}${light}${frontier}`;
-  $("reviewBody").innerHTML = `<h3>Category averages</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>Score / 100</th><th>Avg latency</th><th>Avg tok/s</th><th>Checks</th></tr></thead><tbody>${categories}</tbody></table></div><h3 style="margin-top:22px">Individual checks</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>Score / 100</th><th>Latency</th><th>tok/s</th><th>Evidence</th></tr></thead><tbody>${checks}</tbody></table></div>`;
+  const savedActivity = (report.activity || []).map((event) =>
+    `<li>${duration(event.elapsed)} · ${escapeHtml(event.label)}${event.sample ? ` · ${escapeHtml(event.sample)}` : ""}</li>`
+  ).join("");
+  const activityLog = savedActivity ? `<details><summary>Saved activity log</summary><ol>${savedActivity}</ol></details>` : "";
+  $("reviewBody").innerHTML = `${activityLog}<h3>Category averages</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>Score / 100</th><th>Avg latency</th><th>Avg tok/s</th><th>Checks</th></tr></thead><tbody>${categories}</tbody></table></div><h3 style="margin-top:22px">Individual checks</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>Score / 100</th><th>Latency</th><th>tok/s</th><th>Evidence</th></tr></thead><tbody>${checks}</tbody></table></div>`;
 }
 
 async function compareSelectedRuns() {
