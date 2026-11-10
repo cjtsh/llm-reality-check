@@ -124,13 +124,17 @@ async def models(endpoint: str, api_key: str = ""):
 
 @app.post("/api/runs")
 async def start_run(request: RunRequest):
+    endpoint = normalize_endpoint(request.endpoint)
+    parts = urlsplit(endpoint)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise HTTPException(422, "Endpoint must be a complete URL beginning with http:// or https://")
     run_id = uuid.uuid4().hex
     tasks = profile_tasks(request.profile)
     RUNS[run_id] = {"id": run_id, "status": "running", "completed": 0, "total": len(tasks), "started": time.time(), "model": request.model, "profile": request.profile, "score": None, "categories": {}, "current": "Starting", "tokens": 0, "tps": None}
     SECRETS[run_id] = request.api_key
     with db() as conn:
-        conn.execute("INSERT INTO runs (id, endpoint, model, status) VALUES (?, ?, ?, ?)", (run_id, request.endpoint, request.model, "running"))
-    asyncio.create_task(run_benchmark(run_id, request.endpoint, request.model, request.api_key, request.profile))
+        conn.execute("INSERT INTO runs (id, endpoint, model, status) VALUES (?, ?, ?, ?)", (run_id, endpoint, request.model, "running"))
+    asyncio.create_task(run_benchmark(run_id, endpoint, request.model, request.api_key, request.profile))
     return RUNS[run_id]
 
 

@@ -31,7 +31,7 @@ async function discover() {
 }
 
 async function startRun() {
-  const response = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value, api_key: $("key").value, model: $("model").value || "demo-model", profile: $("profile").value})});
+  const response = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value.trim(), api_key: $("key").value, model: $("model").value || "demo-model", profile: $("profile").value})});
   const payload = await response.json();
   if (!response.ok) { $("note").textContent = payload.detail; return; }
   activeRun = payload.id;
