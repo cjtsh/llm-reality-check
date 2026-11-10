@@ -2,6 +2,7 @@ import asyncio
 import os
 import sqlite3
 import base64
+import json
 import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
@@ -16,7 +17,7 @@ from cryptography.fernet import Fernet
 from .benchmark import profile_tasks, score
 
 ROOT = Path(__file__).parent
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -30,10 +31,12 @@ SECRETS: dict[str, str] = {}  # Temporary v0.1.8 memory store; Keychain is the p
 
 def db():
     conn = sqlite3.connect(DB)
-    conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, endpoint TEXT, model TEXT, status TEXT, score REAL, tps REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-    try: conn.execute("ALTER TABLE runs ADD COLUMN tps REAL")
-    except sqlite3.OperationalError: pass
+    conn.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, endpoint TEXT, model TEXT, status TEXT, score REAL, tps REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, profile TEXT, benchmark_version TEXT)")
+    for column in ("tps REAL", "profile TEXT", "benchmark_version TEXT"):
+        try: conn.execute(f"ALTER TABLE runs ADD COLUMN {column}")
+        except sqlite3.OperationalError: pass
     conn.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, name TEXT UNIQUE, endpoint TEXT, api_key BLOB, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+    conn.execute("CREATE TABLE IF NOT EXISTS check_results (run_id TEXT, ordinal INTEGER, category TEXT, prompt TEXT, answer TEXT, score REAL, latency_s REAL, tokens INTEGER, tps REAL, note TEXT, PRIMARY KEY(run_id, ordinal))")
     conn.commit()
     return conn
 
@@ -130,10 +133,10 @@ async def start_run(request: RunRequest):
         raise HTTPException(422, "Endpoint must be a complete URL beginning with http:// or https://")
     run_id = uuid.uuid4().hex
     tasks = profile_tasks(request.profile)
-    RUNS[run_id] = {"id": run_id, "status": "running", "completed": 0, "total": len(tasks), "started": time.time(), "model": request.model, "profile": request.profile, "score": None, "categories": {}, "current": "Starting", "tokens": 0, "tps": None}
+    RUNS[run_id] = {"id": run_id, "status": "running", "completed": 0, "total": len(tasks), "started": time.time(), "model": request.model, "profile": request.profile, "benchmark_version": VERSION, "score": None, "categories": {}, "checks": [], "current": "Starting", "tokens": 0, "tps": None}
     SECRETS[run_id] = request.api_key
     with db() as conn:
-        conn.execute("INSERT INTO runs (id, endpoint, model, status) VALUES (?, ?, ?, ?)", (run_id, endpoint, request.model, "running"))
+        conn.execute("INSERT INTO runs (id, endpoint, model, status, profile, benchmark_version) VALUES (?, ?, ?, ?, ?, ?)", (run_id, endpoint, request.model, "running", request.profile, VERSION))
     asyncio.create_task(run_benchmark(run_id, endpoint, request.model, request.api_key, request.profile))
     return RUNS[run_id]
 
@@ -146,7 +149,6 @@ async def run_benchmark(run_id: str, endpoint: str, model: str, api_key: str, pr
     works with local servers before adding sandboxed agent tasks.
     """
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    results = []
     tasks = profile_tasks(profile)
     try:
         async with httpx.AsyncClient(timeout=180) as client:
@@ -154,19 +156,87 @@ async def run_benchmark(run_id: str, endpoint: str, model: str, api_key: str, pr
                 if run_id not in RUNS or RUNS[run_id]["status"] == "cancelled":
                     return
                 RUNS[run_id]["current"] = category
-                response = await client.post(endpoint.rstrip("/") + "/chat/completions", headers=headers, json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 300})
-                response.raise_for_status()
-                payload = response.json()
-                answer = payload["choices"][0]["message"].get("content", "")
-                points = score(category, expected, answer)
-                results.append((category, points))
-                usage = payload.get("usage") or {}
-                tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
-                RUNS[run_id]["tokens"] += int(tokens or 0)
+                started = time.perf_counter()
+                task_tokens = 0
+                first_answer = ""
+                tool_info = None
+                messages = [{"role": "user", "content": prompt}]
+                body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 300}
+
+                if category == "tool-use":
+                    expected_tool = "read_file" if "read_file" in prompt else "run_tests"
+                    if expected_tool == "read_file":
+                        function = {"name": expected_tool, "description": "Read the named benchmark fixture file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}}
+                    else:
+                        function = {"name": expected_tool, "description": "Run the focused test suite for a package.", "parameters": {"type": "object", "properties": {"package": {"type": "string"}}, "required": ["package"], "additionalProperties": False}}
+                    body["tools"] = [{"type": "function", "function": function}]
+
+                response = await client.post(endpoint.rstrip("/") + "/chat/completions", headers=headers, json=body)
+                if category == "tool-use" and response.is_error:
+                    expected_tool = "read_file" if "read_file" in prompt else "run_tests"
+                    first_answer = response.text[:1000]
+                    answer = first_answer
+                    tool_info = {"name": "", "arguments": {}, "expected_tool": expected_tool}
+                    payload = {}
+                    message = {}
+                else:
+                    response.raise_for_status()
+                    payload = response.json()
+                    message = payload["choices"][0]["message"]
+                    first_answer = message.get("content") or ""
+                    usage = payload.get("usage") or {}
+                    task_tokens += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+
+                if category == "context":
+                    messages.extend([{"role": "assistant", "content": first_answer}, {"role": "user", "content": "What exact token did I ask you to remember? Reply with the token only."}])
+                    response = await client.post(endpoint.rstrip("/") + "/chat/completions", headers=headers, json={"model": model, "messages": messages, "temperature": 0, "max_tokens": 80})
+                    response.raise_for_status()
+                    payload = response.json()
+                    answer = payload["choices"][0]["message"].get("content", "") or ""
+                    usage = payload.get("usage") or {}
+                    task_tokens += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                elif category == "tool-use" and not response.is_error:
+                    calls = message.get("tool_calls") or []
+                    if calls:
+                        call = calls[0]
+                        function_call = call.get("function") or {}
+                        try:
+                            arguments = json.loads(function_call.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        expected_tool = "read_file" if "read_file" in prompt else "run_tests"
+                        tool_info = {"name": function_call.get("name", ""), "arguments": arguments, "expected_tool": expected_tool}
+                        if tool_info["name"] == expected_tool:
+                            fixture = '{"status":"ready"}' if expected_tool == "read_file" else '{"result":"passed"}'
+                            messages.extend([message, {"role": "tool", "tool_call_id": call.get("id", "benchmark-call"), "content": fixture}, {"role": "user", "content": "Report the relevant value from the tool result in one short sentence."}])
+                            response = await client.post(endpoint.rstrip("/") + "/chat/completions", headers=headers, json={"model": model, "messages": messages, "temperature": 0, "max_tokens": 100})
+                            response.raise_for_status()
+                            payload = response.json()
+                            answer = payload["choices"][0]["message"].get("content", "") or ""
+                            usage = payload.get("usage") or {}
+                            task_tokens += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                        else:
+                            answer = first_answer
+                    else:
+                        answer = first_answer
+                        tool_info = {"name": "", "arguments": {}, "expected_tool": "read_file" if "read_file" in prompt else "run_tests"}
+                else:
+                    answer = first_answer
+
+                elapsed_s = max(time.perf_counter() - started, 0.001)
+                points, note = score(category, expected, answer, prompt, first_answer, tool_info)
+                check = {"ordinal": index + 1, "category": category, "prompt": prompt, "answer": answer[:8000], "score": round(float(points), 1), "latency_s": round(elapsed_s, 2), "tokens": task_tokens, "tps": round(task_tokens / elapsed_s, 1), "note": note}
+                RUNS[run_id]["checks"].append(check)
+                RUNS[run_id]["tokens"] += task_tokens
                 RUNS[run_id]["tps"] = round(RUNS[run_id]["tokens"] / max(time.time() - RUNS[run_id]["started"], 0.001), 1)
                 RUNS[run_id]["completed"] = index + 1
-                RUNS[run_id]["categories"][category] = round(points * 100, 1)
-        final_score = round(sum(points for _, points in results) / len(tasks) * 100)
+                completed_checks = RUNS[run_id]["checks"]
+                category_checks = [item["score"] for item in completed_checks if item["category"] == category]
+                RUNS[run_id]["categories"][category] = round(sum(category_checks) / len(category_checks), 1)
+                RUNS[run_id]["score"] = round(sum(item["score"] for item in completed_checks) / len(completed_checks), 1)
+                with db() as conn:
+                    conn.execute("INSERT OR REPLACE INTO check_results (run_id, ordinal, category, prompt, answer, score, latency_s, tokens, tps, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (run_id, check["ordinal"], category, prompt, check["answer"], check["score"], check["latency_s"], task_tokens, check["tps"], note))
+        final_score = round(sum(item["score"] for item in RUNS[run_id]["checks"]) / len(tasks), 1)
         RUNS[run_id].update(status="complete", score=final_score, elapsed=round(time.time() - RUNS[run_id]["started"], 2), current="Complete")
         with db() as conn:
             conn.execute("UPDATE runs SET status=?, score=?, tps=? WHERE id=?", ("complete", final_score, RUNS[run_id]["tps"], run_id))
@@ -178,9 +248,32 @@ async def run_benchmark(run_id: str, endpoint: str, model: str, api_key: str, pr
 def run_status(run_id: str):
     if run_id not in RUNS:
         raise HTTPException(404, "Run not found in active session")
-    data = dict(RUNS[run_id])
+    data = {key: value for key, value in RUNS[run_id].items() if key != "checks"}
     data["elapsed"] = round(time.time() - data["started"], 1) if data["status"] == "running" else data.get("elapsed", 0)
     return data
+
+
+@app.get("/api/runs/{run_id}/review")
+def run_review(run_id: str):
+    with db() as conn:
+        run = conn.execute("SELECT model, profile, benchmark_version, score FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, "Run not found")
+        rows = conn.execute("SELECT ordinal, category, prompt, answer, score, latency_s, tokens, tps, note FROM check_results WHERE run_id=? ORDER BY ordinal", (run_id,)).fetchall()
+    checks = [dict(zip(("ordinal", "category", "prompt", "answer", "score", "latency_s", "tokens", "tps", "note"), row)) for row in rows]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for check in checks:
+        grouped.setdefault(check["category"], []).append(check)
+    categories = {
+        category: {
+            "score": round(sum(x["score"] for x in items) / len(items), 1),
+            "latency_s": round(sum(x["latency_s"] for x in items) / len(items), 2),
+            "tps": round(sum(x["tps"] for x in items) / len(items), 1),
+            "checks": len(items),
+        }
+        for category, items in grouped.items()
+    }
+    return {"model": run[0], "profile": run[1] or "legacy", "benchmark_version": run[2] or "legacy", "score": run[3], "categories": categories, "checks": checks}
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -195,19 +288,23 @@ def cancel_run(run_id: str):
 @app.get("/api/history")
 def history():
     with db() as conn:
-        rows = conn.execute("SELECT id, endpoint, model, status, score, tps, created_at FROM runs ORDER BY created_at DESC LIMIT 50").fetchall()
-    return {"runs": [dict(zip(("id", "endpoint", "model", "status", "score", "tps", "created_at"), row)) for row in rows]}
+        rows = conn.execute("SELECT id, endpoint, model, status, score, tps, created_at, profile, benchmark_version FROM runs ORDER BY created_at DESC LIMIT 50").fetchall()
+    return {"runs": [dict(zip(("id", "endpoint", "model", "status", "score", "tps", "created_at", "profile", "benchmark_version"), row)) for row in rows]}
 
 
 @app.delete("/api/history")
 def clear_history():
-    with db() as conn: conn.execute("DELETE FROM runs")
+    with db() as conn:
+        conn.execute("DELETE FROM check_results")
+        conn.execute("DELETE FROM runs")
     return {"deleted": "all"}
 
 
 @app.delete("/api/history/{run_id}")
 def delete_history_item(run_id: str):
-    with db() as conn: conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
+    with db() as conn:
+        conn.execute("DELETE FROM check_results WHERE run_id=?", (run_id,))
+        conn.execute("DELETE FROM runs WHERE id=?", (run_id,))
     return {"deleted": run_id}
 
 
