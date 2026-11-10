@@ -42,5 +42,5 @@ def open_when_ready():
 
 if args.open_browser:
     threading.Thread(target=open_when_ready, daemon=True).start()
-print(f"LLM Reality Check v0.3.1: {url}", flush=True)
+print(f"LLM Reality Check v0.3.2: {url}", flush=True)
 uvicorn.run("app.server:app", host=args.host, port=port)

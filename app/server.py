@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from .benchmark import BENCHMARK_VERSION, PROFILES, profile_tasks
 
 ROOT = Path(__file__).parent
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -39,6 +39,12 @@ def db():
         except sqlite3.OperationalError: pass
     conn.execute("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, name TEXT UNIQUE, endpoint TEXT, api_key BLOB, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
     conn.execute("CREATE TABLE IF NOT EXISTS check_results (run_id TEXT, ordinal INTEGER, category TEXT, prompt TEXT, answer TEXT, score REAL, latency_s REAL, tokens INTEGER, tps REAL, note TEXT, PRIMARY KEY(run_id, ordinal))")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS frontier_references (
+            benchmark_version TEXT PRIMARY KEY, run_id TEXT NOT NULL,
+            model TEXT NOT NULL, provider TEXT, score REAL NOT NULL CHECK(score > 0)
+        )
+    """)
     conn.execute("UPDATE runs SET provider_name=(SELECT name FROM providers WHERE providers.endpoint=runs.endpoint ORDER BY updated_at DESC LIMIT 1) WHERE provider_name IS NULL")
     conn.commit()
     return conn
@@ -262,12 +268,55 @@ def run_status(run_id: str):
     return data
 
 
+def frontier_references(conn):
+    rows = conn.execute("SELECT benchmark_version, run_id, model, provider, score FROM frontier_references")
+    return {
+        version: {"run_id": run_id, "model": model, "provider": provider, "score": score}
+        for version, run_id, model, provider, score in rows
+    }
+
+
+def frontier_result(run_id, profile, status, score, reference):
+    if profile != "heavy-v3" or status != "complete" or score is None or not reference:
+        return None
+    ceiling_tie = score == reference["score"] == 100 and run_id != reference["run_id"]
+    return {
+        "index": None if ceiling_tie else round(100 * score / reference["score"], 1),
+        "ceiling_tie": ceiling_tie,
+        "reference": reference,
+    }
+
+
+@app.post("/api/runs/{run_id}/frontier-reference")
+def set_frontier_reference(run_id: str):
+    with db() as conn:
+        # Keep selection and the saved snapshot in one write transaction.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT profile, status, benchmark_version, model, provider_name, score FROM runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Run not found")
+        profile, status, version, model, provider, score = row
+        if profile != "heavy-v3" or status != "complete" or not version or not version.startswith("inspect-") or not score:
+            raise HTTPException(422, "Select a completed Inspect Heavy v3 run with a nonzero score.")
+        conn.execute("""
+            INSERT INTO frontier_references (benchmark_version, run_id, model, provider, score)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(benchmark_version) DO UPDATE SET
+                run_id=excluded.run_id, model=excluded.model, provider=excluded.provider, score=excluded.score
+        """, (version, run_id, model, provider, score))
+    return {"model": model, "provider": provider, "score": score}
+
+
 @app.get("/api/runs/{run_id}/review")
 def run_review(run_id: str):
     with db() as conn:
         run = conn.execute("SELECT model, provider_name, profile, benchmark_version, score, status FROM runs WHERE id=?", (run_id,)).fetchone()
         if not run:
             raise HTTPException(404, "Run not found")
+        reference = frontier_references(conn).get(run[3])
         rows = conn.execute("SELECT ordinal, category, prompt, answer, score, latency_s, tokens, tps, note FROM check_results WHERE run_id=? ORDER BY ordinal", (run_id,)).fetchall()
     checks = [dict(zip(("ordinal", "category", "prompt", "answer", "score", "latency_s", "tokens", "tps", "note"), row)) for row in rows]
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -283,7 +332,7 @@ def run_review(run_id: str):
         for category, items in grouped.items()
     }
     profile = run[2]
-    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "categories": categories, "checks": checks}
+    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "frontier": frontier_result(run_id, profile, run[5], run[4], reference), "categories": categories, "checks": checks}
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -309,8 +358,15 @@ async def cancel_run(run_id: str):
 @app.get("/api/history")
 def history():
     with db() as conn:
+        conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT id, endpoint, provider_name, model, status, score, tps, created_at, profile, benchmark_version FROM runs ORDER BY created_at DESC LIMIT 50").fetchall()
-    return {"runs": [dict(zip(("id", "endpoint", "provider_name", "model", "status", "score", "tps", "created_at", "profile", "benchmark_version"), row)) for row in rows]}
+        references = frontier_references(conn)
+    runs = [dict(row) for row in rows]
+    for run in runs:
+        run["frontier"] = frontier_result(
+            run["id"], run["profile"], run["status"], run["score"], references.get(run["benchmark_version"]),
+        )
+    return {"runs": runs, "frontier_reference": references.get(BENCHMARK_VERSION)}
 
 
 @app.delete("/api/history")
@@ -320,6 +376,7 @@ def clear_history():
     with db() as conn:
         conn.execute("DELETE FROM check_results")
         conn.execute("DELETE FROM runs")
+        conn.execute("DELETE FROM frontier_references")
     return {"deleted": "all"}
 
 

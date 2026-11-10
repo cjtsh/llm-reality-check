@@ -2,7 +2,7 @@
 
 Practical, reproducible benchmarking for local and cloud LLMs.
 
-Version 0.3.1 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
+Version 0.3.2 is an Apple Silicon-first local web application prototype. It runs a localhost dashboard, discovers models from OpenAI-compatible endpoints, stores run metadata in SQLite, and keeps API keys out of the repository.
 
 ## Benchmark scoring
 
@@ -13,6 +13,8 @@ Inspect AI runs published evaluations from Inspect Evals. The profiles pin upstr
 - Agentic and tool use uses BFCL, with multi-turn samples in Standard and Heavy. Heavy also includes sandboxed AgentBench OS tasks.
 
 The dashboard averages the upstream sample scores within each capability and gives the three capability averages equal weight in the overall 0–100 score. Latency and tokens per second are reported separately. Missing or failed evaluation groups leave the overall score incomplete. Compare completed runs on the same profile and benchmark version. Pre-Inspect history retains its original scores and version.
+
+Raw scores are bounded by the test suite. A perfect Light score means all ten samples earned full credit. For a frontier-relative comparison, run a reference model on Heavy v3 and select that completed run as the frontier reference. Its Frontier Index is 100. Other Heavy runs on the same benchmark version are indexed as `100 × raw score / reference raw score`. Results can exceed 100. If two runs both reach the raw ceiling of 100, the dashboard flags the tie instead of ranking them.
 
 Start Docker with Compose before running a full profile. Heavy also requires Docker image builds and at least four CPUs available to the Docker VM. The first run downloads upstream datasets and sandbox images. Use the native Mac app for the sandboxed profiles. The dashboard-only Docker Compose setup does not mount a host Docker socket.
 

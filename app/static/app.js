@@ -4,7 +4,7 @@ let activeRun = null;
 let modelOptions = [];
 const metric = (value, digits = 1, unit = "") => value == null ? "—" : Number(value).toFixed(digits) + unit;
 const benchmarkLabel = (version) => version?.startsWith("inspect-") ? version : `legacy rubric v${version}`;
-$("score").parentElement.querySelector("small").textContent = "Overall capability / 100";
+$("score").parentElement.querySelector("small").textContent = "Raw benchmark score / 100";
 
 const duration = (seconds) => {
   const whole = Math.max(0, Math.floor(seconds));
@@ -97,10 +97,19 @@ async function cancelRun() {
   await pollRun();
 }
 
+function frontierLabel(result) {
+  if (!result) return "—";
+  return result.ceiling_tie ? "Ceiling tie" : metric(result.index);
+}
+
 async function loadHistory() {
   const payload = await fetch("/api/history").then((r) => r.json());
+  const ref = payload.frontier_reference;
+  $("frontierStatus").textContent = ref
+    ? `Heavy frontier reference: ${ref.model}${ref.provider ? ` (${ref.provider})` : ""} · raw ${metric(ref.score)} → index 100.`
+    : "Frontier Index is uncalibrated. Run a frontier model on Heavy v3, select its run, and set it as the reference.";
   const profileLabel = (profile) => ({"light-v1":"Light · v1", "standard-v2":"Standard · v2", "heavy-v3":"Heavy · v3"}[profile] || "Not recorded");
-  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.provider_name || "Unknown")}</td><td>${escapeHtml(run.model)}</td><td><span>${escapeHtml(profileLabel(run.profile))}</span>${run.benchmark_version ? `<small style="display:block;color:var(--muted)">${escapeHtml(benchmarkLabel(run.benchmark_version))}</small>` : ""}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="8">No saved runs yet</td></tr>';
+  $("history").innerHTML = payload.runs.map((run) => `<tr><td><input type="checkbox" class="history-check" data-id="${run.id}"></td><td>${escapeHtml(run.provider_name || "Unknown")}</td><td>${escapeHtml(run.model)}</td><td><span>${escapeHtml(profileLabel(run.profile))}</span>${run.benchmark_version ? `<small style="display:block;color:var(--muted)">${escapeHtml(benchmarkLabel(run.benchmark_version))}</small>` : ""}</td><td>${escapeHtml(run.status)}</td><td>${run.score === null ? "—" : Number(run.score).toFixed(1)}</td><td>${frontierLabel(run.frontier)}</td><td>${run.tps ? Number(run.tps).toFixed(1) : "—"}</td><td>${escapeHtml(run.created_at)}</td></tr>`).join("") || '<tr><td colspan="9">No saved runs yet</td></tr>';
 }
 
 $("discover").addEventListener("click", discover);
@@ -132,9 +141,30 @@ const historyActions = document.createElement("span");
 historyActions.style.cssText = "float:right;display:flex;gap:8px";
 historyActions.innerHTML = '<button class="secondary" id="compareSelected">Compare selected</button><button class="secondary" id="deleteSelected">Delete selected</button><button class="secondary" id="deleteAll">Delete all</button>';
 historyTitle.appendChild(historyActions);
-historyPanel.querySelector("thead tr").innerHTML = "<th></th><th>Provider</th><th>Model</th><th>Test profile</th><th>Status</th><th>Score</th><th>Avg TPS</th><th>Created</th>";
+historyPanel.querySelector("thead tr").innerHTML = "<th></th><th>Provider</th><th>Model</th><th>Test profile</th><th>Status</th><th>Raw score</th><th>Frontier index</th><th>Avg TPS</th><th>Created</th>";
 $("deleteSelected").addEventListener("click", async () => { const ids = [...document.querySelectorAll(".history-check:checked")].map((x) => x.dataset.id); await Promise.all(ids.map((id) => fetch(`/api/history/${id}`, {method: "DELETE"}))); loadHistory(); });
 $("deleteAll").addEventListener("click", async () => { await fetch("/api/history", {method: "DELETE"}); loadHistory(); });
+
+const frontierPanel = document.createElement("div");
+frontierPanel.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px";
+frontierPanel.innerHTML = '<button class="secondary" id="setFrontier">Set selected as frontier reference</button><span id="frontierStatus" style="color:var(--muted)"></span><span id="frontierMessage" role="status"></span>';
+historyPanel.appendChild(frontierPanel);
+$("setFrontier").addEventListener("click", async () => {
+  const selected = [...document.querySelectorAll(".history-check:checked")];
+  $("frontierMessage").textContent = "";
+  if (selected.length !== 1) {
+    $("frontierMessage").textContent = "Select one completed Heavy v3 run.";
+    return;
+  }
+  try {
+    const response = await fetch(`/api/runs/${selected[0].dataset.id}/frontier-reference`, {method: "POST"});
+    if (!response.ok) throw new Error((await response.json()).detail);
+    await loadHistory();
+    $("frontierMessage").textContent = "Frontier reference saved.";
+  } catch (error) {
+    $("frontierMessage").textContent = error.message;
+  }
+});
 
 const reviewPanel = document.createElement("section");
 reviewPanel.className = "panel";
@@ -153,7 +183,11 @@ function renderReview(report) {
   const summary = report.benchmark_version.startsWith("inspect-")
     ? "Overall gives equal weight to reasoning, coding, and agentic performance. Speed is reported separately."
     : "This run used the original app rubric.";
-  $("reviewSummary").textContent = `Overall ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}`;
+  const frontier = report.frontier
+    ? ` Frontier Index ${frontierLabel(report.frontier)} against ${report.frontier.reference.model}.`
+    : "";
+  const light = report.profile === "light-v1" ? " Light is a quick check and can reach its ceiling." : "";
+  $("reviewSummary").textContent = `Raw ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}${light}${frontier}`;
   $("reviewBody").innerHTML = `<h3>Category averages</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>Score / 100</th><th>Avg latency</th><th>Avg tok/s</th><th>Checks</th></tr></thead><tbody>${categories}</tbody></table></div><h3 style="margin-top:22px">Individual checks</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>Score / 100</th><th>Latency</th><th>tok/s</th><th>Evidence</th></tr></thead><tbody>${checks}</tbody></table></div>`;
 }
 
@@ -169,11 +203,11 @@ async function compareSelectedRuns() {
     return;
   }
   $("reviewTitle").textContent = `Side-by-side · ${left.provider}: ${left.model} vs ${right.provider}: ${right.model}`;
-  $("reviewSummary").textContent = `${left.profile_label} · ${benchmarkLabel(left.benchmark_version)} · Same profile and scoring rules.`;
+  $("reviewSummary").textContent = `${left.profile_label} · ${benchmarkLabel(left.benchmark_version)} · Same profile and scoring rules.${left.frontier && right.frontier ? ` Frontier Index ${frontierLabel(left.frontier)} vs ${frontierLabel(right.frontier)} against ${left.frontier.reference.model}.` : ""}`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
   const dimensionRows = [...new Set([...Object.keys(left.categories), ...Object.keys(right.categories)])].map((name) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${left.categories[name] ? Number(left.categories[name].score).toFixed(1) : "—"}</td><td>${right.categories[name] ? Number(right.categories[name].score).toFixed(1) : "—"}</td><td>${left.categories[name] ? metric(left.categories[name].tps) : "—"}</td><td>${right.categories[name] ? metric(right.categories[name].tps) : "—"}</td></tr>`).join("");
   const checkRows = left.checks.map((a, index) => { const b = right.checks[index]; return `<tr><td>${a.ordinal}</td><td>${escapeHtml(categoryLabel(a.category))}</td><td>${Number(a.score).toFixed(1)}</td><td>${b ? Number(b.score).toFixed(1) : "—"}</td><td>${metric(a.latency_s, 2, "s")}</td><td>${metric(b?.latency_s, 2, "s")}</td></tr>`; }).join("");
-  $("reviewBody").innerHTML = `<div class="metrics"><div class="metric"><small>${escapeHtml(left.model)} overall</small><strong>${Number(left.score).toFixed(1)}</strong></div><div class="metric"><small>${escapeHtml(right.model)} overall</small><strong>${Number(right.score).toFixed(1)}</strong></div></div><h3>Category scores and speed</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} tok/s</th><th>${escapeHtml(right.model)} tok/s</th></tr></thead><tbody>${dimensionRows}</tbody></table></div><h3 style="margin-top:22px">Check-by-check scores and latency</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} latency</th><th>${escapeHtml(right.model)} latency</th></tr></thead><tbody>${checkRows}</tbody></table></div>`;
+  $("reviewBody").innerHTML = `<div class="metrics"><div class="metric"><small>${escapeHtml(left.model)} raw</small><strong>${Number(left.score).toFixed(1)}</strong></div><div class="metric"><small>${escapeHtml(right.model)} raw</small><strong>${Number(right.score).toFixed(1)}</strong></div></div><h3>Category scores and speed</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} tok/s</th><th>${escapeHtml(right.model)} tok/s</th></tr></thead><tbody>${dimensionRows}</tbody></table></div><h3 style="margin-top:22px">Check-by-check scores and latency</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>${escapeHtml(left.model)} score</th><th>${escapeHtml(right.model)} score</th><th>${escapeHtml(left.model)} latency</th><th>${escapeHtml(right.model)} latency</th></tr></thead><tbody>${checkRows}</tbody></table></div>`;
 }
 $("compareSelected").addEventListener("click", compareSelectedRuns);
 
