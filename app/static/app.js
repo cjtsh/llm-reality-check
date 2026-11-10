@@ -10,11 +10,24 @@ const duration = (seconds) => {
   const whole = Math.max(0, Math.floor(seconds));
   return whole < 60 ? `${whole}s` : `${Math.floor(whole / 60)}m ${whole % 60}s`;
 };
+const outcomeSummary = document.createElement("p");
+outcomeSummary.style.color = "var(--muted)";
+outcomeSummary.hidden = true;
+$("current").parentElement.after(outcomeSummary);
+$("tasks").parentElement.querySelector("small").textContent = "Checks finished";
+
+function formatOutcomes(outcomes) {
+  const parts = [`${outcomes.passed} passed`, `${outcomes.failed} failed`];
+  if (outcomes.partial) parts.push(`${outcomes.partial} partial`);
+  if (outcomes.ungraded) parts.push(`${outcomes.ungraded} ungraded`);
+  return parts.join(" · ");
+}
+
 const activityPanel = document.createElement("details");
 activityPanel.hidden = true;
 activityPanel.open = true;
 activityPanel.innerHTML = '<summary>Recent activity</summary><ol id="activityList" style="color:var(--muted);padding-left:24px"></ol>';
-$("current").parentElement.after(activityPanel);
+outcomeSummary.after(activityPanel);
 $("eta").parentElement.querySelector("small").textContent = "Current step";
 $("eta").textContent = "—";
 
@@ -51,6 +64,7 @@ async function startRun() {
   if (!response.ok) { $("note").textContent = payload.detail; return; }
   activeRun = payload.id;
   activityPanel.hidden = true;
+  outcomeSummary.hidden = true;
   $("activityList").replaceChildren();
   $("score").textContent = "—";
   $("reviewTitle").textContent = "Performance review";
@@ -76,6 +90,10 @@ async function pollRun() {
   $("eta").textContent = payload.status === "running" ? duration(payload.phase_elapsed ?? 0) : "—";
   $("current").textContent = [payload.current, payload.status === "running" && payload.sample].filter(Boolean).join(" · ");
   if (payload.status === "running") setState(payload.phase || "Benchmark running…", true);
+  if (payload.outcomes) {
+    outcomeSummary.textContent = formatOutcomes(payload.outcomes);
+    outcomeSummary.hidden = finished === 0;
+  }
   const activity = payload.activity || [];
   activityPanel.hidden = activity.length === 0;
   $("activityList").innerHTML = activity.map((event) =>
@@ -147,8 +165,24 @@ $("deleteAll").addEventListener("click", async () => { await fetch("/api/history
 
 const frontierPanel = document.createElement("div");
 frontierPanel.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px";
-frontierPanel.innerHTML = '<button class="secondary" id="setFrontier">Set selected as frontier reference</button><span id="frontierStatus" style="color:var(--muted)"></span><span id="frontierMessage" role="status"></span>';
+frontierPanel.innerHTML = '<button class="secondary" id="reviewSelected">Review selected</button><button class="secondary" id="setFrontier">Set selected as frontier reference</button><span id="frontierStatus" style="color:var(--muted)"></span><span id="frontierMessage" role="status"></span>';
 historyPanel.appendChild(frontierPanel);
+$("reviewSelected").addEventListener("click", async () => {
+  const selected = [...document.querySelectorAll(".history-check:checked")];
+  if (selected.length !== 1) {
+    $("frontierMessage").textContent = "Select one run to review.";
+    return;
+  }
+  try {
+    const response = await fetch(`/api/runs/${selected[0].dataset.id}/review`);
+    if (!response.ok) throw new Error((await response.json()).detail);
+    $("frontierMessage").textContent = "";
+    renderReview(await response.json());
+    reviewPanel.scrollIntoView({block: "start"});
+  } catch (error) {
+    $("frontierMessage").textContent = error.message;
+  }
+});
 $("setFrontier").addEventListener("click", async () => {
   const selected = [...document.querySelectorAll(".history-check:checked")];
   $("frontierMessage").textContent = "";
@@ -179,15 +213,16 @@ function renderReview(report) {
   $("reviewTitle").textContent = `Performance review · ${report.model} (${report.provider})`;
   const categoryLabel = (name) => ({"tool-use":"Agentic / tool use", "structured":"Structured output", "context":"Context recall", "uncertainty":"Uncertainty handling"}[name] || name[0].toUpperCase() + name.slice(1));
   const categories = Object.entries(report.categories || {}).map(([name, item]) => `<tr><td>${escapeHtml(categoryLabel(name))}</td><td>${Number(item.score).toFixed(1)}</td><td>${metric(item.latency_s, 2, "s")}</td><td>${metric(item.tps)}</td><td>${item.checks}</td></tr>`).join("");
-  const checks = (report.checks || []).map((check) => `<tr><td>${check.ordinal}</td><td>${escapeHtml(categoryLabel(check.category))}</td><td>${Number(check.score).toFixed(1)}</td><td>${metric(check.latency_s, 2, "s")}</td><td>${metric(check.tps)}</td><td><details><summary>View prompt and response</summary><b>Prompt:</b><br>${escapeHtml(check.prompt)}<br><b>Response:</b><br>${escapeHtml(check.answer)}<br><b>Scoring source:</b> ${escapeHtml(check.note)}</details></td></tr>`).join("");
+  const checks = (report.checks || []).map((check) => `<tr><td>${check.ordinal}</td><td>${escapeHtml(categoryLabel(check.category))}</td><td>${Number(check.score).toFixed(1)}${check.outcome ? `<br><small>${escapeHtml(check.outcome)}</small>` : ""}</td><td>${metric(check.latency_s, 2, "s")}</td><td>${metric(check.tps)}</td><td><details><summary>View prompt and response</summary><b>Prompt:</b><br>${escapeHtml(check.prompt)}<br><b>Response:</b><br>${escapeHtml(check.answer)}<br><b>Scoring source:</b> ${escapeHtml(check.note)}</details></td></tr>`).join("");
   const summary = report.benchmark_version.startsWith("inspect-")
     ? "Overall gives equal weight to reasoning, coding, and agentic performance. Speed is reported separately."
     : "This run used the original app rubric.";
   const frontier = report.frontier
     ? ` Frontier Index ${frontierLabel(report.frontier)} against ${report.frontier.reference.model}.`
     : "";
+  const outcomes = report.outcomes ? ` ${formatOutcomes(report.outcomes)}.` : "";
   const light = report.profile === "light-v1" ? " Light is a quick check and can reach its ceiling." : "";
-  $("reviewSummary").textContent = `Raw ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}${light}${frontier}`;
+  $("reviewSummary").textContent = `Raw ${metric(report.score)} / 100 · ${report.profile_label} · ${benchmarkLabel(report.benchmark_version)}. ${summary}${outcomes}${light}${frontier}`;
   $("reviewBody").innerHTML = `<h3>Category averages</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>Category</th><th>Score / 100</th><th>Avg latency</th><th>Avg tok/s</th><th>Checks</th></tr></thead><tbody>${categories}</tbody></table></div><h3 style="margin-top:22px">Individual checks</h3><div style="overflow:auto"><table class="review-table"><thead><tr><th>#</th><th>Category</th><th>Score / 100</th><th>Latency</th><th>tok/s</th><th>Evidence</th></tr></thead><tbody>${checks}</tbody></table></div>`;
 }
 

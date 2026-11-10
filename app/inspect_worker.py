@@ -11,7 +11,7 @@ from inspect_ai.hooks import Hooks, hooks
 from inspect_ai.model import get_model
 from inspect_ai.scorer import value_to_float
 
-from .benchmark import Selection, profile_tasks
+from .benchmark import Selection, check_outcome, profile_tasks
 
 
 def emit(**event):
@@ -39,13 +39,19 @@ class DashboardProgress(Hooks):
 
     async def on_sample_end(self, data):
         sample = data.sample
-        scored = not sample.error and bool(sample.scores)
+        outcome = "ungraded"
+        if not sample.error and len(sample.scores or {}) == 1:
+            result = next(iter(sample.scores.values()))
+            grade = value_to_float()(result.value)
+            outcome = check_outcome(grade * 100)
+        labels = {
+            "passed": "Check passed", "failed": "Check failed",
+            "partial": "Check earned partial credit", "ungraded": "Check ended without a grade",
+        }
         emit(
-            phase="Check scored" if scored else "Check ended without a score",
-            sample=str(sample.id),
-            finished=True,
-            duration=sample.total_time,
-            tps=sample_speed(sample)[1] if scored else None,
+            phase=labels[outcome], sample=str(sample.id), finished=True,
+            outcome=outcome, duration=sample.total_time,
+            tps=sample_speed(sample)[1] if outcome != "ungraded" else None,
         )
 
 

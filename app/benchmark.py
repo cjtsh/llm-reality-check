@@ -57,3 +57,14 @@ def profile_tasks(profile: str) -> tuple[Selection, ...]:
         for (source, category, ids), count in zip(sources, PROFILE_COUNTS[profile], strict=True)
         if count
     )
+
+
+
+def check_outcome(score: float) -> str:
+    if score == 100:
+        return "passed"
+    if score == 0:
+        return "failed"
+    if 0 < score < 100:
+        return "partial"
+    return "ungraded"

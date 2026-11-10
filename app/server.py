@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from cryptography.fernet import Fernet
-from .benchmark import BENCHMARK_VERSION, PROFILES, profile_tasks
+from .benchmark import BENCHMARK_VERSION, PROFILES, check_outcome, profile_tasks
 
 ROOT = Path(__file__).parent
 VERSION = "0.3.2"
@@ -151,7 +151,8 @@ async def start_run(request: RunRequest):
         "started": time.monotonic(), "model": request.model, "profile": request.profile,
         "benchmark_version": BENCHMARK_VERSION, "score": None, "current": "Starting Inspect AI",
         "tps": None, "cancel_requested": False,
-        "finished": 0, "activity": [], "phase": "Starting Inspect AI",
+        "finished": 0, "outcomes": dict.fromkeys(("passed", "failed", "partial", "ungraded"), 0),
+        "activity": [], "phase": "Starting Inspect AI",
         "phase_started": time.monotonic(), "sample": None,
     }
     with db() as conn:
@@ -202,6 +203,7 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
                 run["sample"] = event["sample"]
             if event.get("finished"):
                 run["finished"] += 1
+                run["outcomes"][event["outcome"]] += 1
                 if event.get("tps") is not None:
                     measured_speeds.append(event["tps"])
                     run["tps"] = mean(measured_speeds)
@@ -332,7 +334,14 @@ def run_review(run_id: str):
         for category, items in grouped.items()
     }
     profile = run[2]
-    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "frontier": frontier_result(run_id, profile, run[5], run[4], reference), "categories": categories, "checks": checks}
+    outcomes = None
+    if profile in PROFILES and (run[3] or "").startswith("inspect-"):
+        outcomes = dict.fromkeys(("passed", "failed", "partial", "ungraded"), 0)
+        for check in checks:
+            check["outcome"] = check_outcome(check["score"])
+            outcomes[check["outcome"]] += 1
+        outcomes["ungraded"] += sum(len(task.ids) for task in profile_tasks(profile)) - len(checks)
+    return {"model": run[0], "provider": run[1] or "Unknown", "profile": profile or "legacy", "profile_label": PROFILES.get(profile, "Not recorded"), "benchmark_version": run[3] or "legacy", "score": run[4], "status": run[5], "frontier": frontier_result(run_id, profile, run[5], run[4], reference), "categories": categories, "checks": checks, "outcomes": outcomes}
 
 
 @app.post("/api/runs/{run_id}/cancel")
