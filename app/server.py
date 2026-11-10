@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from .benchmark import BENCHMARK_VERSION, PROFILES, check_outcome, profile_tasks
 
 ROOT = Path(__file__).parent
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -66,14 +66,19 @@ class Provider(BaseModel):
     api_key: str = ""
 
 
-class RunRequest(Provider):
+class RunOptions(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     profile: str = "standard-v2"
     stream_activity: bool | None = None
 
 
+class RunRequest(Provider, RunOptions):
+    pass
+
+
 class ProviderUpdate(Provider):
     id: str | None = None
+    clear_api_key: bool = False
 
 
 @app.get("/health")
@@ -91,18 +96,59 @@ def list_providers():
 @app.post("/api/providers")
 def save_provider(provider: ProviderUpdate):
     provider_id = provider.id or uuid.uuid4().hex
+    name = provider.name.strip()
+    try:
+        endpoint = normalize_endpoint(provider.endpoint)
+        parts = urlsplit(endpoint)
+        valid_endpoint = parts.scheme in {"http", "https"} and parts.hostname and not parts.username
+    except ValueError:
+        valid_endpoint = False
+    if not name or not valid_endpoint:
+        raise HTTPException(422, "Enter a name and a complete HTTP or HTTPS endpoint without credentials in the URL.")
     encrypted = FERNET.encrypt(provider.api_key.encode()) if provider.api_key else b""
+    try:
+        with db() as conn:
+            if provider.id:
+                updated = conn.execute(
+                    """UPDATE providers SET name=?, endpoint=?,
+                       api_key=COALESCE(?, api_key), updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                    (name, endpoint, b"" if provider.clear_api_key else encrypted or None, provider_id),
+                )
+                if not updated.rowcount:
+                    raise HTTPException(404, "Provider not found")
+            else:
+                conn.execute(
+                    "INSERT INTO providers (id, name, endpoint, api_key) VALUES (?, ?, ?, ?)",
+                    (provider_id, name, endpoint, encrypted),
+                )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "A provider with this name already exists.") from exc
+    return {"id": provider_id, "name": name, "endpoint": endpoint}
+
+
+def saved_provider(provider_id: str) -> Provider:
     with db() as conn:
-        conn.execute("INSERT INTO providers (id,name,endpoint,api_key) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, endpoint=excluded.endpoint, api_key=CASE WHEN length(excluded.api_key)>0 THEN excluded.api_key ELSE providers.api_key END, updated_at=CURRENT_TIMESTAMP", (provider_id, provider.name, normalize_endpoint(provider.endpoint), encrypted))
-    return {"id": provider_id, "name": provider.name, "endpoint": normalize_endpoint(provider.endpoint)}
+        row = conn.execute("SELECT name, endpoint, api_key FROM providers WHERE id=?", (provider_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Provider not found")
+    return Provider(name=row[0], endpoint=row[1], api_key=FERNET.decrypt(row[2]).decode() if row[2] else "")
 
 
 @app.get("/api/providers/{provider_id}")
 def get_provider(provider_id: str):
-    with db() as conn:
-        row = conn.execute("SELECT id,name,endpoint,api_key FROM providers WHERE id=?", (provider_id,)).fetchone()
-    if not row: raise HTTPException(404, "Provider not found")
-    return {"id": row[0], "name": row[1], "endpoint": row[2], "api_key": FERNET.decrypt(row[3]).decode() if row[3] else ""}
+    return {"id": provider_id, **saved_provider(provider_id).model_dump()}
+
+
+@app.get("/api/providers/{provider_id}/models")
+async def saved_provider_models(provider_id: str):
+    provider = saved_provider(provider_id)
+    return await models(provider.endpoint, provider.api_key)
+
+
+@app.post("/api/providers/{provider_id}/runs")
+async def start_saved_provider_run(provider_id: str, options: RunOptions):
+    provider = saved_provider(provider_id)
+    return await start_run(RunRequest(**provider.model_dump(), **options.model_dump()))
 
 
 @app.delete("/api/providers/{provider_id}")

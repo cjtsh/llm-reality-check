@@ -2,6 +2,9 @@ const $ = (id) => document.getElementById(id);
 let timer = null;
 let activeRun = null;
 let modelOptions = [];
+let providers = [];
+let modelRequest = null;
+let runInProgress = false;
 const metric = (value, digits = 1, unit = "") => value == null ? "—" : Number(value).toFixed(digits) + unit;
 const benchmarkLabel = (version) => version?.startsWith("inspect-") ? version : `legacy rubric v${version}`;
 $("score").parentElement.querySelector("small").textContent = "Raw benchmark score / 100";
@@ -30,16 +33,15 @@ outcomeSummary.after(streamSummary);
 const streamSetting = document.createElement("label");
 streamSetting.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--muted)";
 streamSetting.innerHTML = '<input id="streamActivity" type="checkbox" style="width:auto"> Show live stream activity';
-$("endpoint").parentElement.after(streamSetting);
+$("providerSelect").parentElement.after(streamSetting);
 function defaultStreamSetting() {
   try {
-    $("streamActivity").checked = ["localhost", "127.0.0.1", "[::1]"].includes(new URL($("endpoint").value).hostname);
+    $("streamActivity").checked = ["localhost", "127.0.0.1", "[::1]"].includes(new URL(selectedProvider()?.endpoint ?? "").hostname);
   } catch {
     $("streamActivity").checked = false;
   }
 }
-$("endpoint").addEventListener("change", defaultStreamSetting);
-defaultStreamSetting();
+
 
 const activityPanel = document.createElement("details");
 activityPanel.hidden = true;
@@ -58,28 +60,90 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
+function selectedProvider() {
+  return providers.find((provider) => provider.id === $("providerSelect").value);
+}
+
+function syncRunButton() {
+  $("run").disabled = runInProgress || !$("model").value || !selectedProvider();
+}
+
+function connectionMessage(message, error = false) {
+  $("connectionMessage").textContent = message;
+  $("connectionMessage").classList.toggle("provider-message", error);
+  $("connectionMessage").hidden = !message;
+}
+
+function selectConnection() {
+  modelRequest?.abort();
+  modelRequest = null;
+  const provider = selectedProvider();
+  $("connectionEndpoint").textContent = provider?.endpoint ?? "";
+  $("connectionEndpoint").title = provider?.endpoint ?? "";
+  $("discover").disabled = !provider;
+  $("modelSearch").value = "";
+  modelOptions = [];
+  $("model").replaceChildren(new Option(provider ? "Load models first" : "Choose a provider first", ""));
+  defaultStreamSetting();
+  connectionMessage("");
+  syncRunButton();
+}
+
+async function requestJson(url, options) {
+  const response = await fetch(url, options);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof payload.detail === "string" ? payload.detail : `Request failed (HTTP ${response.status})`);
+  }
+  return payload;
+}
+
 async function discover() {
-  const endpoint = $("endpoint").value.trim();
-  const key = $("key").value;
-  setState("Loading models…", true);
+  const provider = selectedProvider();
+  if (!provider) return;
+  modelRequest?.abort();
+  const request = new AbortController();
+  modelRequest = request;
+  $("discover").disabled = true;
+  modelOptions = [];
+  renderModels([]);
+  connectionMessage("Loading models…");
   try {
-    const response = await fetch("/api/models?endpoint=" + encodeURIComponent(endpoint) + "&api_key=" + encodeURIComponent(key));
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || `Provider returned HTTP ${response.status}`);
-    modelOptions = payload.data.map((model) => model.id);
+    const payload = await requestJson(`/api/providers/${encodeURIComponent(provider.id)}/models`, {signal: request.signal});
+    if (modelRequest !== request) return;
+    modelOptions = payload.data.map((model) => model.id).filter(Boolean);
+    $("modelSearch").value = "";
     renderModels(modelOptions);
-    setState(`${payload.data.length} model${payload.data.length === 1 ? "" : "s"} loaded`);
+    connectionMessage(modelOptions.length ? `${modelOptions.length} models loaded` : "This provider returned no models.");
   } catch (error) {
-    setState("Discovery failed");
-    $("note").textContent = error.message;
-    $("note").style.color = "var(--danger)";
+    if (modelRequest === request) connectionMessage(error.message, true);
+  } finally {
+    if (modelRequest === request) {
+      modelRequest = null;
+      $("discover").disabled = false;
+    }
   }
 }
 
 async function startRun() {
-  const response = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value.trim(), api_key: $("key").value, model: $("model").value || "demo-model", profile: $("profile").value, stream_activity: $("streamActivity").checked})});
-  const payload = await response.json();
-  if (!response.ok) { $("note").textContent = payload.detail; return; }
+  const provider = selectedProvider();
+  const model = $("model").value;
+  if (!provider || !model || runInProgress) return;
+  runInProgress = true;
+  syncRunButton();
+  let payload;
+  try {
+    payload = await requestJson(`/api/providers/${encodeURIComponent(provider.id)}/runs`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model, profile: $("profile").value, stream_activity: $("streamActivity").checked}),
+    });
+  } catch (error) {
+    runInProgress = false;
+    syncRunButton();
+    connectionMessage(error.message, true);
+    return;
+  }
+  connectionMessage("");
   activeRun = payload.id;
   activityPanel.hidden = true;
   outcomeSummary.hidden = true;
@@ -132,7 +196,7 @@ async function pollRun() {
   $("rate").textContent = payload.tps ? `${Number(payload.tps).toFixed(1)} tok/s` : "— tok/s";
   if (payload.score !== null && payload.score !== undefined) $("score").textContent = Number(payload.score).toFixed(1);
   if (payload.status !== "running") {
-    clearInterval(timer); timer = null; $("run").disabled = false; $("cancel").disabled = true;
+    clearInterval(timer); timer = null; runInProgress = false; syncRunButton(); $("cancel").disabled = true;
     setState(payload.error ? `Incomplete: ${payload.error}` : payload.current);
     if (payload.completed) fetch(`/api/runs/${activeRun}/review`).then((r) => r.json()).then(renderReview);
     loadHistory();
@@ -163,23 +227,148 @@ async function loadHistory() {
 $("discover").addEventListener("click", discover);
 $("run").addEventListener("click", startRun);
 $("cancel").addEventListener("click", cancelRun);
-const providerPanel = document.createElement("div");
-providerPanel.className = "panel";
-providerPanel.innerHTML = '<h2>Saved providers</h2><div id="savedProviders" style="display:grid;gap:8px;color:var(--muted)">Loading providers…</div>';
+const providerPanel = document.createElement("section");
+providerPanel.className = "panel providers-panel";
+providerPanel.innerHTML = `
+  <div class="providers-toolbar">
+    <h2>Saved providers</h2>
+    <div class="providers-actions">
+      <input id="providerSearch" type="search" placeholder="Filter providers…" aria-label="Filter saved providers">
+      <button id="addProvider" class="secondary" type="button">＋ Add provider</button>
+    </div>
+  </div>
+  <div id="savedProviders" class="providers-grid" aria-label="Saved providers">Loading providers…</div>
+  <p id="providerMessage" class="provider-message" role="status"></p>`;
 document.querySelector(".grid").before(providerPanel);
 
-async function loadProviders() {
-  const payload = await fetch("/api/providers").then((r) => r.json());
-  const target = $("savedProviders");
-  target.innerHTML = payload.providers.length ? payload.providers.map((p) => `<div style="display:flex;gap:8px;align-items:center"><button class="secondary provider-load" data-id="${p.id}">${escapeHtml(p.name)}</button><span style="font-family:monospace;font-size:12px">${escapeHtml(p.endpoint)}</span><button class="secondary provider-delete" data-id="${p.id}">Delete</button></div>`).join("") : "No saved providers yet.";
-  document.querySelectorAll(".provider-load").forEach((button) => button.addEventListener("click", async () => { const p = await fetch(`/api/providers/${button.dataset.id}`).then((r) => r.json()); $("name").value = p.name; $("endpoint").value = p.endpoint; defaultStreamSetting(); $("key").value = p.api_key; setState(`Loaded ${p.name}`); }));
-  document.querySelectorAll(".provider-delete").forEach((button) => button.addEventListener("click", async () => { await fetch(`/api/providers/${button.dataset.id}`, {method: "DELETE"}); loadProviders(); }));
+const connectionStatus = document.createElement("p");
+connectionStatus.id = "connectionMessage";
+connectionStatus.setAttribute("role", "status");
+$("modelSearch").after(connectionStatus);
+
+const providerDialog = document.createElement("dialog");
+providerDialog.className = "panel provider-dialog";
+providerDialog.setAttribute("aria-labelledby", "providerDialogTitle");
+providerDialog.innerHTML = `
+  <form id="providerForm">
+    <h2 id="providerDialogTitle"></h2>
+    <div class="field"><label for="providerName">Name</label><input id="providerName" maxlength="100" required autofocus></div>
+    <div class="field"><label for="providerEndpoint">OpenAI-compatible endpoint</label><input id="providerEndpoint" type="url" maxlength="500" placeholder="https://api.example.com/v1" required></div>
+    <div class="field"><label for="providerKey">API key</label><input id="providerKey" type="password" autocomplete="off" aria-describedby="providerKeyHint"><small id="providerKeyHint"></small></div>
+    <label id="providerClearLabel" hidden><input id="providerClearKey" type="checkbox" style="width:auto"> Remove saved API key</label>
+    <p id="providerFormMessage" class="provider-message" role="alert"></p>
+    <div class="provider-dialog-actions"><button id="cancelProviderEdit" type="button" class="secondary">Cancel</button><button id="saveProvider" type="submit" class="primary">Save provider</button></div>
+  </form>`;
+document.body.appendChild(providerDialog);
+let editingProvider = null;
+let providerRefresh = 0;
+
+function renderProviders() {
+  const query = $("providerSearch").value.trim().toLowerCase();
+  const matches = providers.filter((p) => `${p.name} ${p.endpoint}`.toLowerCase().includes(query));
+  $("savedProviders").innerHTML = matches.map((p) => `
+    <article class="provider-card">
+      <button class="provider-card-edit" type="button" data-edit="${escapeHtml(p.id)}" aria-label="Edit ${escapeHtml(p.name)}" title="${escapeHtml(p.endpoint)}">
+        <strong>${escapeHtml(p.name)}</strong><span class="provider-endpoint">${escapeHtml(p.endpoint)}</span>
+      </button>
+      <button class="secondary" type="button" data-delete="${escapeHtml(p.id)}" aria-label="Delete ${escapeHtml(p.name)}">Delete</button>
+    </article>`).join("") || `<p class="provider-empty">${providers.length ? "No matching providers." : "Add a provider to get started."}</p>`;
 }
 
-const saveButton = document.createElement("button");
-saveButton.className = "secondary"; saveButton.textContent = "＋ Save provider"; saveButton.style.width = "100%"; saveButton.style.marginTop = "8px";
-$("run").parentElement.insertBefore(saveButton, $("run"));
-saveButton.addEventListener("click", async () => { const p = await fetch("/api/providers", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: $("name").value, endpoint: $("endpoint").value, api_key: $("key").value})}).then((r) => r.json()); setState(`Saved ${p.name}`); loadProviders(); });
+async function loadProviders(preferred = $("providerSelect").value, resetConnection = false) {
+  const refresh = ++providerRefresh;
+  try {
+    const payload = await requestJson("/api/providers");
+    if (refresh !== providerRefresh) return;
+    const previous = $("providerSelect").value;
+    providers = payload.providers;
+    $("providerSelect").replaceChildren(
+      new Option("Choose a saved provider", ""),
+      ...providers.map((p) => new Option(p.name, p.id)),
+    );
+    $("providerSelect").value = providers.some((p) => p.id === preferred) ? preferred : "";
+    if (resetConnection || previous !== $("providerSelect").value) selectConnection();
+    renderProviders();
+  } catch (error) {
+    $("providerMessage").textContent = error.message;
+    if (!providers.length) $("savedProviders").textContent = "Could not load saved providers.";
+  }
+}
+
+function openProviderEditor(provider = null) {
+  editingProvider = provider;
+  $("providerForm").reset();
+  $("providerDialogTitle").textContent = provider ? "Edit provider" : "Add provider";
+  $("providerName").value = provider?.name ?? "";
+  $("providerEndpoint").value = provider?.endpoint ?? "";
+  $("providerClearLabel").hidden = !provider;
+  $("providerKey").disabled = false;
+  $("providerKeyHint").textContent = provider ? "Leave blank to keep the saved key." : "Optional for local servers.";
+  $("providerFormMessage").textContent = "";
+  providerDialog.showModal();
+}
+
+$("providerSelect").addEventListener("change", selectConnection);
+$("model").addEventListener("change", syncRunButton);
+$("providerSearch").addEventListener("input", renderProviders);
+$("addProvider").addEventListener("click", () => openProviderEditor());
+$("cancelProviderEdit").addEventListener("click", () => providerDialog.close());
+providerDialog.addEventListener("cancel", (event) => {
+  if ($("saveProvider").disabled) event.preventDefault();
+});
+$("providerClearKey").addEventListener("change", () => {
+  $("providerKey").disabled = $("providerClearKey").checked;
+});
+$("savedProviders").addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  const provider = providers.find((p) => p.id === (button.dataset.edit ?? button.dataset.delete));
+  if (!provider) return;
+  if (button.dataset.edit) {
+    openProviderEditor(provider);
+    return;
+  }
+  if (!window.confirm(`Delete ${provider.name} from Saved providers?`)) return;
+  button.disabled = true;
+  $("providerMessage").textContent = "";
+  try {
+    await requestJson(`/api/providers/${encodeURIComponent(provider.id)}`, {method: "DELETE"});
+    await loadProviders();
+  } catch (error) {
+    $("providerMessage").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("providerForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("saveProvider").disabled = true;
+  $("cancelProviderEdit").disabled = true;
+  $("providerFormMessage").textContent = "";
+  const current = editingProvider;
+  try {
+    const saved = await requestJson("/api/providers", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        id: current?.id, name: $("providerName").value.trim(),
+        endpoint: $("providerEndpoint").value.trim(), api_key: $("providerKey").disabled ? "" : $("providerKey").value,
+        clear_api_key: $("providerClearKey").checked,
+      }),
+    });
+    const selected = $("providerSelect").value;
+    await loadProviders(current ? selected : selected || saved.id, current?.id === selected);
+    providerDialog.close();
+    $("providerForm").reset();
+  } catch (error) {
+    $("providerFormMessage").textContent = error.message;
+  } finally {
+    $("saveProvider").disabled = false;
+    $("cancelProviderEdit").disabled = false;
+  }
+});
+
+selectConnection();
 loadProviders();
 loadHistory();
 
@@ -281,7 +470,10 @@ async function compareSelectedRuns() {
 $("compareSelected").addEventListener("click", compareSelectedRuns);
 
 function renderModels(models) {
-  $("model").innerHTML = models.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("") || '<option value="">No matching models</option>';
+  $("model").replaceChildren(...(models.length
+    ? models.map((id) => new Option(id, id))
+    : [new Option("No matching models", "")]));
+  syncRunButton();
 }
 
 const searchButton = $("searchModels");
