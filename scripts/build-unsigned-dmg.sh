@@ -65,17 +65,8 @@ find "$RUNTIME" -name __pycache__ -type d -prune -exec rm -rf {} +
 find "$RUNTIME" -name '._*' -type f -delete
 rm -rf "$DMG_ROOT"
 mkdir -p "$DMG_ROOT"
-pkgbuild --component "$APP" --install-location /Applications \
-  "$DMG_ROOT/LLM Reality Check Installer.pkg"
+cp -R "$APP" "$DMG_ROOT/"
+ln -s /Applications "$DMG_ROOT/Applications"
 cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/DISCLAIMER.md" "$DMG_ROOT/"
-cat > "$DMG_ROOT/Install.txt" <<'INSTALL'
-LLM Reality Check 0.2.0
-
-Double-click “LLM Reality Check Installer.pkg” and follow the Installer prompts.
-After installation, open LLM Reality Check from the Applications folder.
-
-This installer is unsigned. If macOS blocks it, Control-click the package,
-choose Open, then confirm Open in the security prompt.
-INSTALL
-hdiutil create -volname "LLM Reality Check Installer" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
+hdiutil create -volname "LLM Reality Check 0.2.0" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
 echo "Created $DMG"
