@@ -7,10 +7,46 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from inspect_ai import eval as inspect_eval
+from inspect_ai.hooks import Hooks, hooks
 from inspect_ai.model import get_model
 from inspect_ai.scorer import value_to_float
 
 from .benchmark import Selection, profile_tasks
+
+
+def emit(**event):
+    print("LRC " + json.dumps(event), flush=True)
+
+
+@hooks("dashboard_progress", "Report live check and provider activity to the dashboard")
+class DashboardProgress(Hooks):
+    async def on_sample_init(self, data):
+        emit(phase="Preparing check", sample=str(data.summary.id))
+
+    async def on_before_model_generate(self, data):
+        emit(phase="Waiting for model response")
+
+    async def on_model_retry(self, data):
+        reason = f"HTTP {data.status_code}" if data.status_code else (data.exception_type or "provider error")
+        emit(phase=f"Retrying after {reason} in {data.wait_time:.1f}s")
+
+    async def on_sample_event(self, data):
+        if data.event.event == "model" and not data.event.error:
+            emit(phase="Model responded")
+
+    async def on_sample_scoring(self, data):
+        emit(phase="Scoring check")
+
+    async def on_sample_end(self, data):
+        sample = data.sample
+        scored = not sample.error and bool(sample.scores)
+        emit(
+            phase="Check scored" if scored else "Check ended without a score",
+            sample=str(sample.id),
+            finished=True,
+            duration=sample.total_time,
+            tps=sample_speed(sample)[1] if scored else None,
+        )
 
 
 def upstream_task(source: str):
@@ -47,6 +83,17 @@ def docker_available() -> bool:
         return False
 
 
+def sample_speed(sample):
+    calls = [event for event in sample.events if event.event == "model"]
+    timed = [event.output.time for event in calls]
+    usages = [event.output.usage for event in calls]
+    tokens = sum(usage.output_tokens for usage in sample.model_usage.values())
+    tps = None
+    if calls and all(t is not None and t > 0 for t in timed) and all(usage and usage.output_tokens > 0 for usage in usages):
+        tps = tokens / sum(timed)
+    return tokens, tps
+
+
 def sample_result(selection: Selection, sample) -> dict:
     source = "bfcl" if selection.source.startswith("bfcl_") else selection.source
     if sample.error or len(sample.scores or {}) != 1:
@@ -56,13 +103,7 @@ def sample_result(selection: Selection, sample) -> dict:
     if not 0 <= grade <= 1:
         raise ValueError("Unexpected upstream score scale")
 
-    calls = [event for event in sample.events if event.event == "model"]
-    timed = [event.output.time for event in calls]
-    usages = [event.output.usage for event in calls]
-    tokens = sum(usage.output_tokens for usage in sample.model_usage.values())
-    tps = None
-    if calls and all(t is not None and t > 0 for t in timed) and all(usage and usage.output_tokens > 0 for usage in usages):
-        tps = tokens / sum(timed)
+    tokens, tps = sample_speed(sample)
 
     prompt = sample.input
     if not isinstance(prompt, str):
@@ -109,23 +150,24 @@ def main():
     model = get_model(
         f"openai-api/lrc/{request['model']}", base_url=request["endpoint"],
         api_key=request["api_key"] or "local", responses_api=False, strict_tools=False,
-        emulate_tools=False, memoize=False,
+        # Let Inspect own retries so its activity hook can report the backoff.
+        emulate_tools=False, memoize=False, max_retries=0,
     )
     has_docker = docker_available()
     with TemporaryDirectory(prefix="lrc-inspect-") as log_dir:
         for selection in profile_tasks(request["profile"]):
-            print("LRC " + json.dumps({"current": selection.source}), flush=True)
+            emit(current=selection.source, phase="Preparing benchmark group")
             try:
                 if selection.source in {"humaneval", "agent_bench_os"} and not has_docker:
-                    print("LRC " + json.dumps({"issue": f"{selection.source}: Docker with Compose is required."}), flush=True)
+                    emit(issue=f"{selection.source}: Docker with Compose is required.")
                     continue
                 checks = run_selection(selection, model, log_dir)
-                print("LRC " + json.dumps({"checks": checks}), flush=True)
+                emit(checks=checks)
             except KeyboardInterrupt:
                 return
             except Exception as exc:
                 # Provider errors can contain request details. Report only the source and error type.
-                print("LRC " + json.dumps({"issue": f"{selection.source}: Inspect could not complete or score this group ({type(exc).__name__})."}), flush=True)
+                emit(issue=f"{selection.source}: Inspect could not complete or score this group ({type(exc).__name__}).")
 
 
 if __name__ == "__main__":

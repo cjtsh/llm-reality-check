@@ -5,7 +5,7 @@ OUT="$ROOT/dist"
 APP="$OUT/LLM Reality Check.app"
 CONTENTS="$APP/Contents"
 RUNTIME="$CONTENTS/Resources/runtime"
-DMG="$ROOT/LLM-Reality-Check-0.3.0-unsigned.dmg"
+DMG="$ROOT/LLM-Reality-Check-0.3.1-unsigned.dmg"
 DMG_ROOT="$ROOT/build/dmg"
 
 command -v uv >/dev/null || { echo "uv is required to build the app runtime" >&2; exit 1; }
@@ -21,8 +21,8 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>LLM Reality Check</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.0</string>
-  <key>CFBundleVersion</key><string>0.3.0</string>
+  <key>CFBundleShortVersionString</key><string>0.3.1</string>
+  <key>CFBundleVersion</key><string>0.3.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -62,5 +62,5 @@ mkdir -p "$DMG_ROOT"
 cp -R "$APP" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/DISCLAIMER.md" "$DMG_ROOT/"
-hdiutil create -volname "LLM Reality Check 0.3.0" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
+hdiutil create -volname "LLM Reality Check 0.3.1" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG"
 echo "Created $DMG"

@@ -6,6 +6,18 @@ const metric = (value, digits = 1, unit = "") => value == null ? "—" : Number(
 const benchmarkLabel = (version) => version?.startsWith("inspect-") ? version : `legacy rubric v${version}`;
 $("score").parentElement.querySelector("small").textContent = "Overall capability / 100";
 
+const duration = (seconds) => {
+  const whole = Math.max(0, Math.floor(seconds));
+  return whole < 60 ? `${whole}s` : `${Math.floor(whole / 60)}m ${whole % 60}s`;
+};
+const activityPanel = document.createElement("details");
+activityPanel.hidden = true;
+activityPanel.open = true;
+activityPanel.innerHTML = '<summary>Recent activity</summary><ol id="activityList" style="color:var(--muted);padding-left:24px"></ol>';
+$("current").parentElement.after(activityPanel);
+$("eta").parentElement.querySelector("small").textContent = "Current step";
+$("eta").textContent = "—";
+
 function setState(message, live = false) {
   $("state").textContent = message;
   $("dot").className = "dot" + (live ? " live" : "");
@@ -38,6 +50,8 @@ async function startRun() {
   const payload = await response.json();
   if (!response.ok) { $("note").textContent = payload.detail; return; }
   activeRun = payload.id;
+  activityPanel.hidden = true;
+  $("activityList").replaceChildren();
   $("score").textContent = "—";
   $("reviewTitle").textContent = "Performance review";
   $("reviewSummary").textContent = "Inspect AI is running the selected samples." ;
@@ -48,13 +62,25 @@ async function startRun() {
 }
 
 async function pollRun() {
-  const payload = await fetch(`/api/runs/${activeRun}`).then((r) => r.json());
-  const percent = payload.completed / payload.total * 100;
+  const response = await fetch(`/api/runs/${activeRun}`).catch(() => null);
+  if (!response?.ok) {
+    setState("Lost connection to the dashboard. Checking again…");
+    return;
+  }
+  const payload = await response.json();
+  const finished = Math.max(payload.finished ?? 0, payload.completed);
+  const percent = finished / payload.total * 100;
   $("bar").style.width = `${percent}%`;
-  $("tasks").textContent = `${payload.completed} / ${payload.total}`;
-  $("elapsed").textContent = `${(payload.elapsed || 0).toFixed(1)}s`;
-  $("eta").textContent = payload.completed ? `${Math.max(0, (payload.elapsed / payload.completed) * (payload.total - payload.completed)).toFixed(1)}s` : "calculating";
-  $("current").textContent = payload.current || payload.status;
+  $("tasks").textContent = `${finished} / ${payload.total}`;
+  $("elapsed").textContent = duration(payload.elapsed || 0);
+  $("eta").textContent = payload.status === "running" ? duration(payload.phase_elapsed ?? 0) : "—";
+  $("current").textContent = [payload.current, payload.status === "running" && payload.sample].filter(Boolean).join(" · ");
+  if (payload.status === "running") setState(payload.phase || "Benchmark running…", true);
+  const activity = payload.activity || [];
+  activityPanel.hidden = activity.length === 0;
+  $("activityList").innerHTML = activity.map((event) =>
+    `<li>${duration(event.elapsed)} · ${escapeHtml(event.label)}${event.sample ? ` · ${escapeHtml(event.sample)}` : ""}</li>`
+  ).join("");
   $("rate").textContent = payload.tps ? `${Number(payload.tps).toFixed(1)} tok/s` : "— tok/s";
   if (payload.score !== null && payload.score !== undefined) $("score").textContent = Number(payload.score).toFixed(1);
   if (payload.status !== "running") {

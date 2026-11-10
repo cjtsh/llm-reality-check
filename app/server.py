@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from .benchmark import BENCHMARK_VERSION, PROFILES, profile_tasks
 
 ROOT = Path(__file__).parent
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 DATA_DIR = Path(os.getenv("LLM_REALITY_CHECK_DATA_DIR", str(ROOT.parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB = DATA_DIR / "reality-check.sqlite3"
@@ -145,6 +145,8 @@ async def start_run(request: RunRequest):
         "started": time.monotonic(), "model": request.model, "profile": request.profile,
         "benchmark_version": BENCHMARK_VERSION, "score": None, "current": "Starting Inspect AI",
         "tps": None, "cancel_requested": False,
+        "finished": 0, "activity": [], "phase": "Starting Inspect AI",
+        "phase_started": time.monotonic(), "sample": None,
     }
     with db() as conn:
         conn.execute(
@@ -164,6 +166,7 @@ def average(values):
 async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
     run = RUNS[run_id]
     checks = []
+    measured_speeds = []
     issues = []
     worker = None
     try:
@@ -188,8 +191,27 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
             event = json.loads(line[4:])
             if "current" in event:
                 run["current"] = f"Inspect AI · {event['current']}"
+                run["sample"] = None
+            if "sample" in event:
+                run["sample"] = event["sample"]
+            if event.get("finished"):
+                run["finished"] += 1
+                if event.get("tps") is not None:
+                    measured_speeds.append(event["tps"])
+                    run["tps"] = mean(measured_speeds)
             if "issue" in event:
                 issues.append(event["issue"])
+            if "phase" in event or "issue" in event:
+                now = time.monotonic()
+                run.update(phase=event.get("phase") or event["issue"], phase_started=now)
+                label = run["phase"]
+                if event.get("finished") and event.get("duration") is not None:
+                    label += f" in {event['duration']:.1f}s"
+                run["activity"] = (run["activity"] + [{
+                    "elapsed": round(now - run["started"]),
+                    "label": label,
+                    "sample": run["sample"],
+                }])[-8:]
             for check in event.get("checks", []):
                 checks.append(check)
                 with db() as conn:
@@ -199,7 +221,6 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
                          check["score"], check["latency_s"], check["tokens"], check["tps"], check["note"]),
                     )
             run["completed"] = len(checks)
-            run["tps"] = average(check["tps"] for check in checks)
         if await worker.wait() != 0 and not run["cancel_requested"]:
             issues.append("The Inspect worker exited before finishing.")
     except Exception:
@@ -221,7 +242,7 @@ async def run_benchmark(run_id: str, endpoint: str, request: RunRequest):
         else:
             status = "incomplete"
         run.update(
-            status=status, current=status.capitalize(), error=" ".join(issues),
+            status=status, tps=average(check["tps"] for check in checks), current=status.capitalize(), error=" ".join(issues),
             elapsed=round(time.monotonic() - run["started"], 2),
         )
         with db() as conn:
@@ -237,6 +258,7 @@ def run_status(run_id: str):
         raise HTTPException(404, "Run not found in active session")
     data = dict(RUNS[run_id])
     data["elapsed"] = round(time.monotonic() - data["started"], 1) if data["status"] == "running" else data.get("elapsed", 0)
+    data["phase_elapsed"] = round(time.monotonic() - data["phase_started"], 1)
     return data
 
 
@@ -270,7 +292,7 @@ async def cancel_run(run_id: str):
     if not run:
         raise HTTPException(404, "Run not found")
     if run["status"] == "running" and not run["cancel_requested"]:
-        run.update(cancel_requested=True, current="Stopping Inspect AI")
+        run.update(cancel_requested=True, current="Stopping Inspect AI", phase="Stopping Inspect AI", phase_started=time.monotonic())
         worker = WORKERS.get(run_id)
         if worker and worker.returncode is None:
             try:
